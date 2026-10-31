@@ -1,314 +1,254 @@
-#!/usr/bin/env python3
-"""Developer product icons, one look each (2026-09-29), so each product is easy to tell apart on the
-group transactions page.
-Each is a 512 px square in its own colour with a big glyph and a label:
+"""RoPlague: the store icons of our developer products and gamepasses (Roblox shows them in the purchase
+prompt and on the experience's store page). Each is a 512 px rounded tile in the item's colour with its
+own glyph from build/plague_icons or build/trait_icons, or, for an infection colour, a hex of that
+colour in the map's soft patches. No text in any of them.
 
-  takeover     crimson, a crown           TAKE OVER
-  crate        blue, the chest            CRATE
-  crate_first  green, the chest + a star  FIRST CRATE
-  crate3       violet, three chests       3 CRATES
-  crate10      amber, three chests + 10   10 CRATES
-
---upload sets them on the products (Open Cloud developer-products v2 PATCH, multipart imageFile; ids
-from src/shared/Data/Products.luau; one not created yet, id 0, is skipped). The API key is read from
-.secrets/roblox_api_key, never printed.
---create KEY --universe ID [--write prod|staging] makes product KEY in that experience (matched by
-name: one that exists is only reported, its price left alone) at Data/Products' Robux price, on sale,
-with its icon, and with --write puts its id into Products.luau (`id =` production, `staging =`).
-
-Usage: .venv/bin/python tools/assets/make_product_icons.py [--upload | --create KEY --universe ID [--write W]]
+    .venv/Scripts/python.exe tools/assets/make_product_icons.py   ->  build/product_icons/<key>.png
 """
-import argparse
-import io
-import json
+
+import math
 import os
-import re
 import sys
-import urllib.request
-import uuid
 
-import resvg_py
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT = os.path.join(ROOT, "build", "products")
-UNIVERSE = 10768172922
-FONT = "/System/Library/Fonts/Supplemental/Arial Black.ttf"
-SIZE = 512
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+OUT = os.path.join(REPO, "build", "product_icons")
+S = 512
+sys.path.insert(0, os.path.join(REPO, "src", "shared", "Data"))
 
-ICONS = {
-    "takeover": {"top": (226, 58, 58), "bottom": (120, 14, 30), "label": "TAKE OVER", "glyph": "crown"},
-    "crate": {"top": (70, 132, 255), "bottom": (22, 38, 128), "label": "CRATE", "glyph": "chest"},
-    "crate_first": {"top": (56, 196, 110), "bottom": (10, 92, 52), "label": "FIRST CRATE", "glyph": "chest_star"},
-    "crate3": {"top": (164, 104, 255), "bottom": (58, 22, 132), "label": "3 CRATES", "glyph": "chest3"},
-    "crate10": {"top": (255, 178, 52), "bottom": (150, 64, 6), "label": "10 CRATES", "glyph": "chest3",
-                "tint": (255, 226, 160), "badge": "10"},
-    # RoWorld General (Data/Subscription): the subscription's picture (Creator Dashboard, 150 px; not a
-    # developer product: --general writes build/products/general_150.png to upload there)
-    "general": {"top": (44, 60, 104), "bottom": (12, 18, 40), "label": "GENERAL", "glyph": "insignia"},
-}
-# --create: the product's name and description (as the crates' on production)
-NAMES = {
-    "crate3": ("3 Cosmetic Crates", "Three crates, each a territory skin or a flag you don't own yet. Odds are shown in "
-               "the game before you buy."),
-    "crate10": ("10 Cosmetic Crates", "Ten crates, each a territory skin or a flag you don't own yet. Odds are shown in "
-                "the game before you buy."),
+# key: (tile colour, glyph file or a drawn shape)
+GLYPHS = {
+    "unlock_head_start": ((255, 150, 60), "plague_icons/dna.png"),
+    "unlock_bubble_magnet": ((235, 70, 50), "plague_icons/infect.png"),
+    "unlock_super_spreader": ((226, 72, 58), "trait_icons/carrier.png"),
+    "unlock_sea_legs": ((60, 180, 255), "trait_icons/water2.png"),
+    "unlock_gene_bank": ((70, 190, 100), "plague_icons/evolve.png"),
+    "unlock_slow_science": ((90, 170, 255), "plague_icons/cure.png"),
+    "unlock_mutagen": ((170, 90, 240), "trait_icons/hardy.png"),
+    "unlock_stars2x": ((255, 200, 61), "@star2"),
+    "starter_pack": ((232, 46, 56), "@gift"),
+    "crate": ((200, 120, 50), "@crate"),
+    "crate_first": ((230, 150, 60), "@crate"),
+    "crate3": ((210, 110, 40), "@crate3"),
+    "crate10": ((240, 170, 40), "@crate10"),
+    "takeover": ((120, 140, 255), "plague_icons/world.png"),
+    "rename": ((255, 90, 80), "plague_icons/pencil.png"),
+    "auto_pop": ((70, 150, 255), "@autopop"),
 }
 
 
-def gradient(top, bottom):
-    im = Image.new("RGBA", (SIZE, SIZE))
-    d = ImageDraw.Draw(im)
-    for y in range(SIZE):
-        k = y / (SIZE - 1)
-        d.line([(0, y), (SIZE, y)], fill=tuple(int(top[i] + (bottom[i] - top[i]) * k) for i in range(3)) + (255,))
-    return im
-
-
-def rounded_mask(r=88):
-    m = Image.new("L", (SIZE, SIZE), 0)
-    ImageDraw.Draw(m).rounded_rectangle([0, 0, SIZE - 1, SIZE - 1], radius=r, fill=255)
-    return m
-
-
-def shadowed(layer, offset=10, blur=10, alpha=110):
-    """layer (RGBA) over a soft drop shadow of itself."""
-    a = layer.getchannel("A")
-    sh = Image.new("RGBA", layer.size, (0, 0, 0, 0))
-    sh.putalpha(a.point(lambda v: v * alpha // 255))
-    sh = sh.filter(ImageFilter.GaussianBlur(blur))
-    out = Image.new("RGBA", layer.size, (0, 0, 0, 0))
-    out.alpha_composite(sh, (0, offset))
-    out.alpha_composite(layer)
+def tile(col):
+    """A rounded square: the colour at the top deepening to night at the bottom, a soft inner glow."""
+    y = np.linspace(0, 1, S)[:, None]
+    top = np.array(col, dtype=np.float32) * 0.85 + 30
+    bot = np.array((14, 18, 38), dtype=np.float32)
+    grad = top[None, None, :] * (1 - y[..., None] * 0.85) + bot[None, None, :] * (y[..., None] * 0.85)
+    grad = np.broadcast_to(grad, (S, S, 3))
+    im = Image.fromarray(np.clip(grad, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([8, 8, S - 8, S - 8], radius=96, fill=255)
+    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    out.paste(im, (0, 0), mask)
+    glow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse([96, 80, S - 96, S - 112], fill=tuple(int(c) for c in col) + (120,))
+    glow = glow.filter(ImageFilter.GaussianBlur(48))
+    out.alpha_composite(Image.composite(glow, Image.new("RGBA", (S, S), (0, 0, 0, 0)), mask))
+    rim = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(rim).rounded_rectangle([10, 10, S - 10, S - 10], radius=94, outline=(255, 255, 255, 90), width=8)
+    out.alpha_composite(rim)
     return out
 
 
-def chest(px):
-    svg = open(os.path.join(ROOT, "assets", "crate", "crate_icon.svg"), encoding="utf-8").read()
-    im = Image.open(io.BytesIO(bytes(resvg_py.svg_to_bytes(svg_string=svg, width=px, height=px)))).convert("RGBA")
-    return im
-
-
-def crown(px):
-    im = Image.new("RGBA", (px, px), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    w, h = px, px
-    base_top, base_bot = h * 0.70, h * 0.86
-    pts = [
-        (w * 0.10, base_top), (w * 0.06, h * 0.30), (w * 0.30, h * 0.52), (w * 0.50, h * 0.16),
-        (w * 0.70, h * 0.52), (w * 0.94, h * 0.30), (w * 0.90, base_top),
-    ]
-    d.polygon(pts, fill=(255, 255, 255, 255))
-    d.rounded_rectangle([w * 0.10, base_top + h * 0.03, w * 0.90, base_bot], radius=h * 0.03, fill=(255, 255, 255, 255))
-    for cx, cy in ((0.06, 0.30), (0.50, 0.16), (0.94, 0.30)):
-        r = w * 0.06
-        d.ellipse([w * cx - r, h * cy - r, w * cx + r, h * cy + r], fill=(255, 255, 255, 255))
-    return im
-
-
-def star(px, fill):
-    im = Image.new("RGBA", (px, px), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    import math
-    c = px / 2
-    pts = []
-    for i in range(16):
-        r = c * (0.98 if i % 2 == 0 else 0.74)
-        a = math.pi * 2 * i / 16 - math.pi / 2
-        pts.append((c + math.cos(a) * r, c + math.sin(a) * r))
-    d.polygon(pts, fill=fill)
-    return im
-
-
-def star5(px, fill):
-    """A five-pointed star (a general's insignia)."""
-    import math
-    im = Image.new("RGBA", (px, px), (0, 0, 0, 0))
-    c = px / 2
+def star(d, cx, cy, r, fill):
     pts = []
     for i in range(10):
-        r = c * (0.98 if i % 2 == 0 else 0.40)
-        a = math.pi * 2 * i / 10 - math.pi / 2
-        pts.append((c + math.cos(a) * r, c * 1.06 + math.sin(a) * r))
-    ImageDraw.Draw(im).polygon(pts, fill=fill)
-    return im
+        a = -math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * 0.45
+        pts.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
+    d.polygon(pts, fill=(30, 18, 8, 255))
+    pts2 = [(cx + (x - cx) * 0.86, cy + (y - cy) * 0.86) for x, y in pts]
+    d.polygon(pts2, fill=fill)
 
 
-def render(key, spec):
-    im = gradient(spec["top"], spec["bottom"])
-    # a soft light behind the glyph
-    glow = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse([96, 40, 416, 360], fill=(255, 255, 255, 60))
-    im.alpha_composite(glow.filter(ImageFilter.GaussianBlur(40)))
-    g = spec["glyph"]
-    if g == "crown":
-        glyph = crown(300)
-        im.alpha_composite(shadowed(glyph), ((SIZE - 300) // 2, 30))
-    elif g == "insignia":
-        # one big gold star, a smaller one each side
-        gold = (232, 192, 88, 255)
-        for x, y, px in ((48, 150, 120), (SIZE - 48 - 120, 150, 120), ((SIZE - 280) // 2, 40, 280)):
-            im.alpha_composite(shadowed(star5(px, gold), offset=8, blur=8), (x, y))
-    elif g == "chest3":
-        # two behind (tinted with the ground), one in front with a cut-out edge so the three read apart
-        back = chest(220)
-        tint = Image.new("RGBA", back.size, spec.get("tint", (206, 184, 255)) + (255,))
-        tint.putalpha(back.getchannel("A"))
-        im.alpha_composite(shadowed(tint), (34, 52))
-        im.alpha_composite(shadowed(tint), (SIZE - 34 - 220, 52))
-        front = chest(280)
-        pad = 14
-        edge = Image.new("RGBA", (280 + pad * 2, 280 + pad * 2), (0, 0, 0, 0))
-        a = Image.new("L", edge.size, 0)
-        a.paste(front.getchannel("A"), (pad, pad))
-        ring = Image.new("RGBA", edge.size, spec["bottom"] + (255,))
-        ring.putalpha(a.filter(ImageFilter.MaxFilter(2 * (pad // 2) + 1)))
-        x0 = (SIZE - 280) // 2
-        im.alpha_composite(ring, (x0 - pad, 96 - pad))
-        im.alpha_composite(shadowed(front, offset=12, blur=12, alpha=150), (x0, 96))
-        if spec.get("badge"):
-            st = star(170, (255, 255, 255, 255))
-            d = ImageDraw.Draw(st)
-            f = ImageFont.truetype(FONT, 64)
-            d.text((85, 88), spec["badge"], font=f, fill=spec["bottom"] + (255,), anchor="mm")
-            im.alpha_composite(shadowed(st.rotate(-12, resample=Image.BICUBIC), offset=6, blur=6), (322, 12))
+def crate(d, x, y, w, col):
+    h = w * 0.78
+    d.rounded_rectangle([x, y, x + w, y + h], radius=w * 0.08, fill=(40, 22, 10, 255))
+    d.rounded_rectangle([x + 10, y + 10, x + w - 10, y + h - 10], radius=w * 0.06, fill=col)
+    d.rectangle([x + 10, y + h * 0.36, x + w - 10, y + h * 0.46], fill=(40, 22, 10, 255))
+    d.rounded_rectangle([x + w * 0.42, y + h * 0.3, x + w * 0.58, y + h * 0.56], radius=8, fill=(255, 214, 90, 255),
+                        outline=(40, 22, 10, 255), width=6)
+
+
+def shape(kind):
+    g = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(g)
+    if kind == "@star2":
+        star(d, S * 0.42, S * 0.52, 150, (255, 214, 80, 255))
+        star(d, S * 0.7, S * 0.36, 82, (255, 236, 150, 255))
+    elif kind == "@gift":
+        d.rounded_rectangle([140, 200, 372, 400], radius=20, fill=(40, 10, 14, 255))
+        d.rounded_rectangle([150, 210, 362, 390], radius=16, fill=(255, 220, 110, 255))
+        d.rectangle([236, 200, 276, 400], fill=(232, 46, 56, 255))
+        d.rounded_rectangle([124, 160, 388, 220], radius=16, fill=(40, 10, 14, 255))
+        d.rounded_rectangle([132, 168, 380, 212], radius=12, fill=(255, 236, 160, 255))
+        d.rectangle([236, 160, 276, 220], fill=(232, 46, 56, 255))
+        d.ellipse([186, 104, 256, 170], outline=(232, 46, 56, 255), width=18)
+        d.ellipse([256, 104, 326, 170], outline=(232, 46, 56, 255), width=18)
+    elif kind == "@crate":
+        crate(d, 116, 150, 280, (196, 128, 64, 255))
+    elif kind == "@crate3":
+        crate(d, 70, 210, 190, (176, 112, 54, 255))
+        crate(d, 250, 210, 190, (176, 112, 54, 255))
+        crate(d, 160, 110, 190, (206, 138, 70, 255))
+    elif kind == "@autopop":
+        return auto_pop()
+    elif kind == "@crate10":
+        for i, (x, y) in enumerate(((60, 250), (190, 250), (320, 250), (125, 160), (255, 160), (190, 80))):
+            crate(d, x, y, 130, (186 + i * 6, 122, 58, 255))
+    return g
+
+
+def bubble(out, cx, cy, r, top, bot, icon, popping=False):
+    """A bubble the way the match draws it: a gradient core, a white rim, its glyph; popping: burst rays."""
+    b = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(b)
+    if popping:
+        for i in range(10):
+            a = i * math.pi / 5 + 0.3
+            r0, r1 = r * 1.22, r * 1.62
+            d.line([(cx + math.cos(a) * r0, cy + math.sin(a) * r0), (cx + math.cos(a) * r1, cy + math.sin(a) * r1)],
+                   fill=(255, 255, 255, 235), width=max(6, int(r * 0.13)))
+    yy, xx = np.mgrid[0:S, 0:S]
+    k = np.clip((yy - (cy - r)) / (2 * r), 0, 1)[..., None]
+    col = np.array(top, np.float32) * (1 - k) + np.array(bot, np.float32) * k
+    inside = ((xx - cx) ** 2 + (yy - cy) ** 2) <= r * r
+    core = np.zeros((S, S, 4), np.uint8)
+    core[..., :3] = np.clip(col, 0, 255).astype(np.uint8)
+    core[..., 3] = inside * 255
+    b.alpha_composite(Image.fromarray(core, "RGBA"))
+    d = ImageDraw.Draw(b)
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 255, 255, 245), width=max(5, int(r * 0.1)))
+    # (the shine on its own layer: drawing a translucent fill straight onto the core would cut a hole)
+    hi = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(hi).ellipse([cx - r * 0.55, cy - r * 0.72, cx - r * 0.12, cy - r * 0.42], fill=(255, 255, 255, 150))
+    b.alpha_composite(hi)
+    g = Image.open(os.path.join(REPO, "build", icon)).convert("RGBA")
+    box = g.split()[3].getbbox()
+    if box:
+        g = g.crop(box)
+    kk = r * 1.1 / max(g.width, g.height)
+    g = g.resize((max(1, int(g.width * kk)), max(1, int(g.height * kk))), Image.LANCZOS)
+    b.alpha_composite(g, (int(cx - g.width / 2), int(cy - g.height / 2)))
+    shadow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    shadow.putalpha(b.split()[3].point(lambda v: int(v * 0.5)))
+    out.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(9)), (6, 12))
+    out.alpha_composite(b)
+
+
+def auto_pop():
+    """Auto Pop Bubbles: a DNA, a cure and a hotspot bubble, the big one bursting by itself."""
+    g = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    bubble(g, 190, 280, 112, (255, 156, 66), (226, 52, 30), "plague_icons/dna.png", popping=True)
+    bubble(g, 368, 160, 70, (120, 196, 255), (34, 98, 222), "plague_icons/cure.png")
+    bubble(g, 372, 372, 64, (255, 96, 96), (196, 18, 30), "plague_icons/infect.png")
+    return g
+
+
+def glyph(path, size=300):
+    im = Image.open(os.path.join(REPO, "build", path)).convert("RGBA")
+    box = im.split()[3].getbbox()
+    if box:
+        im = im.crop(box)
+    k = size / max(im.width, im.height)
+    im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))), Image.LANCZOS)
+    shadow = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    a = im.split()[3]
+    shadow.putalpha(a.point(lambda v: int(v * 0.55)))
+    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    x, y = (S - im.width) // 2, (S - im.height) // 2
+    out.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)), (x + 8, y + 14))
+    out.alpha_composite(im, (x, y))
+    return out
+
+
+def hash2(x, y):
+    return np.mod(np.sin(x * 127.1 + y * 311.7) * 43758.5453, 1.0)
+
+
+def vnoise(x, y):
+    xi, yi = np.floor(x), np.floor(y)
+    fx, fy = x - xi, y - yi
+    fx = fx * fx * (3 - 2 * fx)
+    fy = fy * fy * (3 - 2 * fy)
+    a, b, c, d = hash2(xi, yi), hash2(xi + 1, yi), hash2(xi, yi + 1), hash2(xi + 1, yi + 1)
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
+
+
+def swatch(a, b, rainbow=False):
+    """A flat-top hex filled with the colour in the map's soft patches (a -> b by the noise)."""
+    yy, xx = np.mgrid[0:S, 0:S].astype(np.float64)
+    n = vnoise(xx / 46, yy / 46) * 0.65 + vnoise(xx / 18 + 17, yy / 18 + 31) * 0.35
+    if rainbow:
+        import colorsys
+        rgb = np.zeros((S, S, 3))
+        hs = (n * 1.4 + xx / S * 0.4) % 1.0
+        for i in range(0, S, 4):
+            for j in range(0, S, 4):
+                r, g, bb = colorsys.hsv_to_rgb(hs[i, j], 0.75, 1.0)
+                rgb[i:i + 4, j:j + 4] = (r * 255, g * 255, bb * 255)
     else:
-        glyph = chest(300)
-        im.alpha_composite(shadowed(glyph), ((SIZE - 300) // 2, 40))
-        if g == "chest_star":
-            st = star(170, (255, 206, 60, 255))
-            d = ImageDraw.Draw(st)
-            f = ImageFont.truetype(FONT, 50)
-            d.text((85, 88), "1st", font=f, fill=(96, 50, 0, 255), anchor="mm")
-            im.alpha_composite(shadowed(st.rotate(-12, resample=Image.BICUBIC), offset=6, blur=6), (322, 12))
-    # the label
-    label = spec["label"]
-    size = 92
-    font = ImageFont.truetype(FONT, size)
-    d = ImageDraw.Draw(im)
-    while d.textlength(label, font=font) > SIZE - 56 and size > 40:
-        size -= 4
-        font = ImageFont.truetype(FONT, size)
-    txt = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    ImageDraw.Draw(txt).text((SIZE / 2, 430), label, font=font, fill=(255, 255, 255, 255), anchor="mm",
-                             stroke_width=6, stroke_fill=(0, 0, 0, 150))
-    im.alpha_composite(shadowed(txt, offset=6, blur=5))
-    out = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    out.paste(im, (0, 0), rounded_mask())
-    os.makedirs(OUT, exist_ok=True)
-    p = os.path.join(OUT, key + ".png")
-    out.save(p, optimize=True)
-    return p
+        A, B = np.array(a, dtype=np.float64), np.array(b, dtype=np.float64)
+        rgb = A[None, None, :] * (1 - n[..., None]) + B[None, None, :] * n[..., None]
+    im = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB").convert("RGBA")
+    mask = Image.new("L", (S, S), 0)
+    r = 180
+    cx, cy = S / 2, S / 2 + 6
+    pts = [(cx + r * math.cos(math.pi / 3 * i), cy + r * 0.92 * math.sin(math.pi / 3 * i)) for i in range(6)]
+    ImageDraw.Draw(mask).polygon(pts, fill=255)
+    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    edge = Image.new("L", (S, S), 0)
+    big = [(cx + (r + 14) * math.cos(math.pi / 3 * i), cy + (r + 14) * 0.92 * math.sin(math.pi / 3 * i)) for i in range(6)]
+    ImageDraw.Draw(edge).polygon(big, fill=255)
+    out.paste((250, 250, 255, 255), (0, 0), edge)
+    out.paste(im, (0, 0), mask)
+    gl = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(gl).ellipse([150, 120, 300, 200], fill=(255, 255, 255, 70))
+    out.alpha_composite(Image.composite(gl.filter(ImageFilter.GaussianBlur(14)), Image.new("RGBA", (S, S), (0, 0, 0, 0)), mask))
+    return out
 
 
-def product_ids():
-    src = open(os.path.join(ROOT, "src", "shared", "Data", "Products.luau"), encoding="utf-8").read()
-    return {k: int(v) for k, v in re.findall(r"^\s*(\w+) = \{ id = (\d+)", src, re.M)}
-
-
-def call(method, url, fields=None, image=None):
-    api_key = open(os.path.join(ROOT, ".secrets", "roblox_api_key"), encoding="utf-8").read().strip()
-    boundary = "----rofront" + uuid.uuid4().hex
-    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
-             for k, v in (fields or {}).items()]
-    if image is not None:
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="imageFile"; filename="icon.png"\r\n'
-                     f"Content-Type: image/png\r\n\r\n".encode() + open(image, "rb").read() + b"\r\n")
-    headers = {"x-api-key": api_key}
-    body = None
-    if parts:
-        parts.append(f"--{boundary}--\r\n".encode())
-        body = b"".join(parts)
-        headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-    req = urllib.request.Request(url, data=body, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return r.status, r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
-
-
-def create(key, universe, write, icon):
-    name, desc = NAMES[key]
-    src = open(os.path.join(ROOT, "src", "shared", "Data", "Products.luau"), encoding="utf-8").read()
-    robux = int(re.search(rf"^\s*{key} = \{{[^\n]*robux = (\d+)", src, re.M).group(1))
-    api = f"https://apis.roblox.com/developer-products/v2/universes/{universe}/developer-products"
-    status, text = call("GET", api + "/creator?pageSize=100")
-    if status >= 300:
-        raise SystemExit(f"can't list the experience's products: HTTP {status} {text[:200]}")
-    pid = next((p.get("productId") for p in json.loads(text).get("developerProducts", []) if p.get("name") == name), None)
-    if pid:
-        print(f"{key}: {name!r} exists in {universe}: {pid} (price left alone)")
-    else:
-        status, text = call("POST", api, {"name": name, "description": desc, "price": str(robux), "isForSale": "true"}, icon)
-        if status >= 300:
-            raise SystemExit(f"{key}: HTTP {status} {text[:300]}")
-        pid = json.loads(text).get("productId")
-        print(f"{key}: created {name!r} in {universe} at {robux} Robux: {pid}")
-    if write:
-        field = "id" if write == "prod" else "staging"
-        path = os.path.join(ROOT, "src", "shared", "Data", "Products.luau")
-        lines = open(path, encoding="utf-8").read().split("\n")
-        for i, line in enumerate(lines):
-            if re.match(rf"^\s*{key} = \{{", line):
-                lines[i] = re.sub(rf"\b{field} = \d+", f"{field} = {int(pid)}", line, count=1)
-        open(path, "w", encoding="utf-8").write("\n".join(lines))
-        print(f"{key}: {field} = {pid} -> src/shared/Data/Products.luau")
-
-
-def upload(key, path, pid):
-    api_key = open(os.path.join(ROOT, ".secrets", "roblox_api_key"), encoding="utf-8").read().strip()
-    boundary = "----rofront" + uuid.uuid4().hex
-    data = open(path, "rb").read()
-    body = b"".join([
-        f"--{boundary}\r\nContent-Disposition: form-data; name=\"imageFile\"; filename=\"{key}.png\"\r\n"
-        f"Content-Type: image/png\r\n\r\n".encode(), data, b"\r\n", f"--{boundary}--\r\n".encode(),
-    ])
-    url = f"https://apis.roblox.com/developer-products/v2/universes/{UNIVERSE}/developer-products/{pid}"
-    req = urllib.request.Request(url, data=body, method="PATCH", headers={
-        "x-api-key": api_key, "Content-Type": f"multipart/form-data; boundary={boundary}"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return r.status, r.read().decode("utf-8", "replace")[:300]
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")[:300]
+def colours():
+    """The infection colours, read from src/shared/Data/Strains.luau (the one list)."""
+    import re
+    src = open(os.path.join(REPO, "src", "shared", "Data", "Strains.luau"), encoding="utf-8").read()
+    out = []
+    for m in re.finditer(r'\{\s*key = "(\w+)",\s*name = "([^"]+)",\s*rarity = "(\w+)",\s*a = \{ (\d+), (\d+), (\d+) \},'
+                         r'\s*b = \{ (\d+), (\d+), (\d+) \}(,\s*rainbow = true)?', src):
+        k, name, rarity = m.group(1), m.group(2), m.group(3)
+        a = tuple(int(m.group(i)) for i in (4, 5, 6))
+        b = tuple(int(m.group(i)) for i in (7, 8, 9))
+        out.append((k, a, b, m.group(10) is not None))
+    return out
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--upload", action="store_true")
-    ap.add_argument("--create", default="")
-    ap.add_argument("--universe", default="")
-    ap.add_argument("--write", choices=["prod", "staging"], default="")
-    args = ap.parse_args()
-    paths = {k: render(k, s) for k, s in ICONS.items()}
-    small = Image.open(paths["general"]).resize((150, 150), Image.LANCZOS)
-    small.save(os.path.join(OUT, "general_150.png"), optimize=True)
-    for k, p in paths.items():
-        print(k, "->", os.path.relpath(p, ROOT))
-    if args.create:
-        if args.create not in NAMES or not args.universe:
-            raise SystemExit("--create KEY (one of " + ", ".join(NAMES) + ") needs --universe")
-        create(args.create, args.universe, args.write, paths[args.create])
-        return
-    if not args.upload:
-        return
-    ids = product_ids()
-    failed = False
-    for k, p in paths.items():
-        pid = ids.get(k)
-        if pid == 0:
-            print(k, "not created yet (id 0): skipped")
-            continue
-        if not pid:
-            print(k, "no product id")
-            failed = True
-            continue
-        status, text = upload(k, p, pid)
-        print(k, pid, "PATCH", status, text)
-        failed = failed or status >= 300
-    if failed:
-        sys.exit(1)
+    os.makedirs(OUT, exist_ok=True)
+    for key, (col, g) in GLYPHS.items():
+        im = tile(col)
+        im.alpha_composite(shape(g) if g.startswith("@") else glyph(g))
+        im.save(os.path.join(OUT, key + ".png"))
+    n = 0
+    if os.path.exists(os.path.join(REPO, "src", "shared", "Data", "Strains.luau")):
+        for k, a, b, rb in colours():
+            im = tile(((a[0] + b[0]) // 2, (a[1] + b[1]) // 2, (a[2] + b[2]) // 2))
+            im.alpha_composite(swatch(a, b, rb))
+            im.save(os.path.join(OUT, "strain_" + k + ".png"))
+            n += 1
+    # (Auto Pop's bubbles alone, for the shop's own icon: Assets/PlagueIcons auto_pop)
+    auto_pop().save(os.path.join(REPO, "build", "plague_icons", "auto_pop.png"))
+    print("icons", len(GLYPHS), "+ strains", n)
 
 
 if __name__ == "__main__":

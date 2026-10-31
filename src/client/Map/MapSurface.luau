@@ -35,8 +35,17 @@ local Rules = core("Rules")
 local Cosmetics: any = if IS_ROBLOX
 	then require(game:GetService("ReplicatedStorage"):WaitForChild("Airfront"):WaitForChild("Data").Cosmetics) :: any
 	else (require :: any)("../../shared/Data/Cosmetics")
+--- RoPlague: the infection colours (Data/Strains) the plague can wear
+local Strains: any = if IS_ROBLOX
+	then require(game:GetService("ReplicatedStorage"):WaitForChild("Airfront"):WaitForChild("Data").Strains) :: any
+	else (require :: any)("../../shared/Data/Strains")
 
 local F_FALLOUT: number = Defs.F_FALLOUT
+-- RoPlague: infected / dead tiles (GameState.flags) are tinted toward the plague's colour / darkened,
+-- inside the country's own fill and border (the country keeps its land)
+local F_PLAGUE: number = (Defs.F_INF or 2) + (Defs.F_DEAD or 4)
+local F_DEAD_BIT: number = Defs.F_DEAD or 4
+
 
 local band = bit32.band
 local readu8, writeu8 = buffer.readu8, buffer.writeu8
@@ -606,8 +615,92 @@ function MapSurface.bind(self: MapSurface, state: any)
 	end
 	self.hover = 0
 	(self :: any)._hover_fill = false
+	-- RoPlague: a plague match tints infected tiles in the disease's colour (its owner's)
+	local pl = if state then state.plague else nil
+	;(self :: any)._plague_on = pl ~= nil
+	if pl ~= nil then
+		local o = state.owners[pl.pid]
+		;(self :: any)._plague_rgba = if o ~= nil then o.rgba else nil
+	end
+	self:_read_strain()
 	self:refresh_palette()
 	self:rebuild_all()
+end
+
+--- RoPlague: the infection colour the plague wears (its cosmetics' `color`: a shop colour "shop_<strain>"
+--- or a crate's "color_<strain>";
+--- none: Data/Strains.DEFAULT). True when it changed.
+function MapSurface._read_strain(self: any): boolean
+	local st = self._state
+	local key = Strains.worn(st)
+	-- a shared world (several plagues): one colour each, kept apart (Strains.distinct); tiles carry their
+	-- plague in flag bits 3..5 (PlagueSim._pbits)
+	local list = if st ~= nil and st.plague ~= nil and type(st.plague.plagues) == "table" and #st.plague.plagues > 1
+		then st.plague.plagues
+		else nil
+	local keys = nil
+	if list ~= nil then
+		keys = {}
+		for i, r in list do
+			keys[i] = Strains.worn_by(st, r.pid)
+		end
+		key = key .. "|" .. table.concat(keys, ",")
+	end
+	if self._strain_key == key then
+		return false
+	end
+	self._strain_key = key
+	if keys ~= nil then
+		local cols = Strains.distinct(keys)
+		self._strains = cols
+		local me = st.local_owner or 0
+		self._strain = cols[1]
+		for i, r in list :: any do
+			if r.pid == me then
+				self._strain = cols[i]
+			end
+		end
+		return true
+	end
+	self._strains = nil
+	local s = Strains.get(key)
+	self._strain = {
+		a = s.a,
+		b = s.b,
+		rainbow = s.rainbow == true,
+	}
+	return true
+end
+
+--- A shared world: which plague (1..) holds each country (its owner id), so a held country's whole
+--- border wears that plague's colour, infected tiles or not. Repaints the countries that changed.
+function MapSurface.set_holders(self: any, held: { [number]: number }?)
+	local old = self._held or {}
+	local new = held or {}
+	self._held = if next(new) ~= nil then new else nil
+	for c, k in new do
+		if old[c] ~= k then
+			self:repaint_owner(c)
+		end
+	end
+	for c in old do
+		if new[c] == nil then
+			self:repaint_owner(c)
+		end
+	end
+end
+
+--- The colour plague k (1..) wears on the map (a shared world; nil: the one plague's).
+function MapSurface.plague_color(self: any, k: number): Color3?
+	local list = self._strains
+	local s = if list ~= nil then list[k] else self._strain
+	if s == nil then
+		return nil
+	end
+	if s.rainbow then
+		return Color3.fromHSV((os.clock() * 0.12) % 1, 0.8, 1)
+	end
+	return Color3.fromRGB(s.a[1], s.a[2], s.a[3]):Lerp(Color3.fromRGB(s.b[1], s.b[2], s.b[3]), 0.35)
 end
 
 function MapSurface.unbind(self: MapSurface)
@@ -658,6 +751,10 @@ end
 
 --- Owners' skins changed (GameState.cosmetics_changed): their land repaints.
 function MapSurface.on_cosmetics_changed(self: any, ids: { number })
+	-- (RoPlague: a new infection colour repaints every infected tile)
+	if self:_read_strain() and (self :: any)._plague_on then
+		self:rebuild_all()
+	end
 	self:_load_skins(ids)
 	self:refresh_palette()
 	for _, id in ids do
@@ -820,8 +917,102 @@ function MapSurface.tile_pixel(self: MapSurface, i: number): number
 end
 
 --- Composite tile i (terrain under its overlay) into the image buffer.
+--- RoPlague: infected land is the country's colour flushed red in soft, organic patches (smooth value
+--- noise over a few tiles, two octaves), not a flat wash and not salt-and-pepper dots; the dead darken.
+local function hash(x: number, y: number): number
+	return (math.sin(x * 127.1 + y * 311.7) * 43758.5453) % 1
+end
+
+local function vnoise(x: number, y: number): number
+	local xi, yi = math.floor(x), math.floor(y)
+	local fx, fy = x - xi, y - yi
+	fx = fx * fx * (3 - 2 * fx)
+	fy = fy * fy * (3 - 2 * fy)
+	local a = hash(xi, yi)
+	local b = hash(xi + 1, yi)
+	local c = hash(xi, yi + 1)
+	local d = hash(xi + 1, yi + 1)
+	return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
+end
+
+--- 0..1, smooth across neighbouring tiles.
+local function patches(self: any, i: number): number
+	local W = self.W or 2000
+	local x, y = i % W, i // W
+	return vnoise(x / 7, y / 7) * 0.65 + vnoise(x / 2.5 + 17, y / 2.5 + 31) * 0.35
+end
+
+local function plague_mix(self: MapSurface, over: number, f: number, i: number, raw: number): number
+	local a = over // 16777216
+	local r = over % 256
+	local g = (over // 256) % 256
+	local b = (over // 65536) % 256
+	local pr, pg, pb, k
+	local border = a == 255
+	local n = patches(self, i)
+	if band(f, F_DEAD_BIT) ~= 0 then
+		-- dead: a deep, dark red-brown, mottled
+		pr, pg, pb = 46, 10, 16
+		k = if border then 0.5 else 0.62 + 0.25 * n
+	else
+		-- infected: flushed in the plague's colour (Data/Strains: `a` in the patches' low parts, `b` in
+		-- their high ones; the rainbow one turns the patches into hue), stronger in the patches
+		local list = (self :: any)._strains
+		local s = if list ~= nil then (list[(raw // 8) % 8 + 1] or (self :: any)._strain) else (self :: any)._strain
+		if s == nil then
+			pr, pg, pb = 214, 28, 40
+		elseif s.rainbow then
+			local c = Color3.fromHSV((n * 1.6 + (i % 2000) / 2000 * 0.5) % 1, 0.8, 1)
+			pr, pg, pb = c.R * 255, c.G * 255, c.B * 255
+		else
+			local sa, sb = s.a, s.b
+			pr, pg, pb = sa[1] + (sb[1] - sa[1]) * n, sa[2] + (sb[2] - sa[2]) * n, sa[3] + (sb[3] - sa[3]) * n
+		end
+		k = if border then 0.35 else 0.32 + 0.4 * n
+		if border and list ~= nil then
+			-- (a shared world: held land outlined hard in its plague's brighter colour, so whose is whose
+			-- reads at a glance)
+			local b2 = s.b or s.a
+			if not s.rainbow and b2 ~= nil then
+				pr, pg, pb = b2[1], b2[2], b2[3]
+			end
+			k = 0.88
+		end
+	end
+	local na = if border then 255 else math.max(a, 220)
+	return pack(r + (pr - r) * k, g + (pg - g) * k, b + (pb - b) * k, na)
+end
+
 local function composite(self: MapSurface, i: number)
 	local over = self:tile_pixel(i)
+	if (self :: any)._plague_on then
+		local raw = readu8(self._flags :: buffer, i)
+		local f = band(raw, F_PLAGUE)
+		if f ~= 0 and over // 16777216 > 0 then
+			over = plague_mix(self, over, f, i, raw)
+		end
+		-- a shared world: a held country's border is drawn hard in its plague's colour (set_holders)
+		local held = (self :: any)._held
+		if held ~= nil then
+			local own = self._own :: buffer
+			local o = readi32(own, i * 4)
+			local hk = held[o]
+			local list = (self :: any)._strains
+			local s = if hk ~= nil and list ~= nil then list[hk] else nil
+			if s ~= nil then
+				local W, N = self.W, self.N
+				local x = i % W
+				local edge = (x > 0 and readi32(own, (i - 1) * 4) ~= o)
+					or (x < W - 1 and readi32(own, (i + 1) * 4) ~= o)
+					or (i >= W and readi32(own, (i - W) * 4) ~= o)
+					or (i < N - W and readi32(own, (i + W) * 4) ~= o)
+				if edge then
+					local c = if s.rainbow then { 255, 255, 255 } else (s.b or s.a)
+					over = pack(c[1], c[2], c[3], 255)
+				end
+			end
+		end
+	end
 	local a = over // 16777216
 	local k = i * 4
 	if a == 0 then
@@ -870,8 +1061,15 @@ local function paint_queue(self: MapSurface, head: number, last: number)
 	-- the fallout flags are not read while the state has no fallout anywhere)
 	local st0 = self._state
 	local fallout = st0 == nil or (tonumber(st0.fallout_count) or 1) > 0
+	-- (RoPlague: infected tiles take the slow, exact path too)
+	local flag_mask = F_FALLOUT
+	if (self :: any)._plague_on then
+		fallout = true
+		flag_mask = F_FALLOUT + F_PLAGUE
+	end
 	local hover = self.hover
 	local skins = (self :: any)._skins
+	local held = (self :: any)._held
 	local st = self._state
 	local alliances = if st ~= nil then st.alliances else nil
 	if alliances ~= nil and next(alliances) == nil then
@@ -885,7 +1083,11 @@ local function paint_queue(self: MapSurface, head: number, last: number)
 		local o = readi32(own, k)
 		local x = i % W
 		local y = i // W
-		if (fallout and band(readu8(flags, i), F_FALLOUT) ~= 0) or o >= MAX_OWNERS or (o > 0 and skins[o] ~= nil) then
+		if
+			(fallout and band(readu8(flags, i), flag_mask) ~= 0)
+			or o >= MAX_OWNERS
+			or (o > 0 and (skins[o] ~= nil or (held ~= nil and held[o] ~= nil)))
+		then
 			composite(self, i)
 		elseif o <= 0 then
 			writeu32(comp, k, readu32(terrain, k))
@@ -1491,7 +1693,31 @@ function MapSurface.step(self: MapSurface, budget_tiles: number?, repaint_tiles:
 					for r = 0, rows - 1 do
 						buffer.copy(scratch, r * row_bytes, self.comp, ((t.y0 + ly0 + r) * W + t.x0) * 4, row_bytes)
 					end
-					img:WritePixelsBuffer(Vector2.new(0, ly0), Vector2.new(t.w, rows), scratch)
+					-- (an experience without "Allow Mesh / Image APIs" refuses the write: the map would be
+					-- Roblox's magenta checkerboard. Say why, once, on the screen and in the output.)
+					local ok, err = pcall(img.WritePixelsBuffer, img, Vector2.new(0, ly0), Vector2.new(t.w, rows), scratch)
+					if not ok then
+						if not self._blocked then
+							self._blocked = true
+							warn("[MapSurface] the map cannot be drawn: " .. tostring(err)
+								.. " -> Game Settings > Security > turn on Allow Mesh / Image APIs, then publish.")
+							local note = Instance.new("TextLabel")
+							note.Name = "MapBlocked"
+							note.BackgroundColor3 = Color3.fromRGB(10, 12, 26)
+							note.BackgroundTransparency = 0.1
+							note.Size = UDim2.new(1, 0, 0, 54)
+							note.Position = UDim2.fromScale(0, 0.5)
+							note.Font = Enum.Font.GothamBold
+							note.TextSize = 16
+							note.TextWrapped = true
+							note.TextColor3 = Color3.new(1, 1, 1)
+							note.Text = "The map can't be drawn: this experience needs Game Settings > Security > "
+								.. "Allow Mesh / Image APIs turned on."
+							note.ZIndex = 50
+							note.Parent = self.root
+						end
+						return
+					end
 				end
 			end
 			self.uploaded = true

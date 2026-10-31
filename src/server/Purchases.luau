@@ -76,7 +76,7 @@ type Record = {
 	credits: { [string]: number },
 	receipts: { string },
 	owned: { [string]: boolean },
-	equipped: { skin: string?, flag: string? },
+	equipped: { skin: string?, flag: string?, color: string? },
 	crates_bought: number,
 	stars: number,
 	stars_earned: number,
@@ -186,7 +186,7 @@ local function clean(v: any, user_id: number?): Record
 		end
 	end
 	if type(v.equipped) == "table" then
-		for _, slot in { "skin", "flag" } do
+		for _, slot in { "skin", "flag", "color" } do
 			local id = v.equipped[slot]
 			local it = Cosmetics.item(id)
 			if it ~= nil and it.kind == slot and rec.owned[id] then
@@ -413,7 +413,7 @@ end
 --- What the player shows in a match: { skin = id?, flag = id? } (nil when nothing is equipped).
 function Purchases.equipped(player: any): any
 	local i = inv[player]
-	if i == nil or (i.equipped.skin == nil and i.equipped.flag == nil) then
+	if i == nil or (i.equipped.skin == nil and i.equipped.flag == nil and i.equipped.color == nil) then
 		return nil
 	end
 	return table.clone(i.equipped)
@@ -473,10 +473,11 @@ function Purchases.grant(user_id: number, kind: string, receipt: string, n: numb
 				if #keys == 0 then
 					rec.stars = math.min(rec.stars + math.floor(paid * Purchases.DUPLICATE_STARS_PER_ROBUX), Purchases.MAX_STARS)
 				end
-				local worn = Shop.key_of(rec.equipped.flag)
+				-- (RoPlague: the shop's items are infection colours, worn in the "color" slot)
+				local worn = Shop.key_of(rec.equipped.color)
 				local worn_set = if worn ~= nil then (Shop.flag(worn) :: any).set else nil
 				if wear ~= nil and worn_set ~= set_id then
-					rec.equipped.flag = wear
+					rec.equipped.color = wear
 				end
 			elseif shop_key ~= nil then
 				local id = Shop.item_id(shop_key)
@@ -487,7 +488,7 @@ function Purchases.grant(user_id: number, kind: string, receipt: string, n: numb
 					rec.stars = math.min(rec.stars + back, Purchases.MAX_STARS)
 				else
 					rec.owned[id] = true
-					rec.equipped.flag = id -- (chosen and paid for: worn at once)
+					rec.equipped.color = id -- (chosen and paid for: worn at once)
 				end
 			elseif kind == "starter" then
 				local t = now_s()
@@ -681,9 +682,10 @@ function Purchases.open_crate(player: any): (boolean, string?)
 	return true, got
 end
 
---- Equip an owned item in its slot ("skin" / "flag"), or clear the slot (id false). Yields.
+--- Equip an owned item in its slot ("skin" / "flag" / "color": RoPlague's infection colour), or clear
+--- the slot (id false). Yields.
 function Purchases.equip(player: any, slot: string, id: any): (boolean, string?)
-	if slot ~= "skin" and slot ~= "flag" then
+	if slot ~= "skin" and slot ~= "flag" and slot ~= "color" then
 		return false, "bad slot"
 	end
 	if id ~= false then

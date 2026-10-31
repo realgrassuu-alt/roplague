@@ -341,7 +341,8 @@ function EventFeed._trim(self)
 			end
 		end
 		local limit = self._bottom - self._top_limit
-		local max_toasts = 5
+		-- (`max_toasts` set by a mode that wants fewer: RoPlague's match keeps 3)
+		local max_toasts = self.max_toasts or 5
 		if self.top_mode then
 			max_toasts = 3
 		elseif ctx.compact then

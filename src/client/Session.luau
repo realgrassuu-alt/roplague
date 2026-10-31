@@ -151,7 +151,11 @@ local function roblox_env(): { [string]: any }
 	end
 	-- Core modules are required lazily: a missing module must never break boot.
 	env.require_core = function(name: string): any
-		local m = Core:FindFirstChild(name)
+		-- "Plague/PlagueSim": a module in a folder under Core
+		local m: Instance? = Core
+		for part in string.gmatch(name, "[^/]+") do
+			m = if m ~= nil then m:FindFirstChild(part) else nil
+		end
 		if m == nil then
 			return nil
 		end
@@ -212,6 +216,8 @@ function Session.new(env: { [string]: any }?)
 	self.lobby_kinds = nil :: { string }?
 	--- (state) Quick Play: { state = "joining" | "line" | "going" | "idle", mode, info } (PUBLIC_STATE)
 	self.public_changed = Signal.new()
+	--- RoPlague: the Plague Race changed (started, standings, over, or nil: no race any more)
+	self.race_changed = Signal.new()
 	self.public = { state = "idle" } :: { [string]: any }
 	--- Game admins only (the server sends it to nobody else): owner id → true for bot players.
 	self.admin_bots = nil :: { [number]: boolean }?
@@ -387,14 +393,18 @@ end
 --- Starts (asynchronously) the title attract simulation; state_ready fires when it is live.
 function Session.start_title(self: any)
 	self:_leave_multiplayer_if_needed()
+	self._trailer = false
 	self._wait_map = nil
+	-- RoPlague: the backdrop is a plague spreading across the real world by itself (a bot plays it)
 	self:_start_local(MODE_TITLE, {
 		seed = self:_rand_seed(),
 		difficulty = 1,
-		tribes = Session.TITLE_TRIBES,
 		max_humans = 0,
 		time_limit_s = 0,
-		map_id = Session.TITLE_MAP_ID,
+		map_id = nil,
+		auto = true,
+		strategy = "balanced",
+		zero_after = 0,
 	}, "")
 end
 
@@ -422,21 +432,127 @@ end
 --- to the start (the tutorial's match has fewer tribes and starts at once: Data/Tutorial).
 function Session.start_solo(self: any, p_difficulty: number, map_id: string?, opts: any?)
 	self:_leave_multiplayer_if_needed()
+	self._trailer = false
 	self.difficulty = math.clamp(math.floor(tonumber(p_difficulty) or 1), 0, 2)
-	self.map_id = if type(map_id) == "string" and map_id ~= "" then map_id else nil
+	-- (RoPlague: the World map carries the country layer, so every solo match plays on it)
+	self.map_id = nil
+	local _ = map_id
 	local tribes = if type(opts) == "table" and type(opts.tribes) == "number" then opts.tribes else Session.SOLO_TRIBES
 	local countdown = if type(opts) == "table" and type(opts.countdown_ticks) == "number"
 		then opts.countdown_ticks
 		else nil
+	-- RoPlague: the strain's starting evolution and the plague's name (the player's nation)
+	local plague_name = if type(opts) == "table" and type(opts.name) == "string" and opts.name ~= ""
+		then opts.name
+		else self:local_display_name()
 	self:_start_local(MODE_SOLO, {
-		seed = self:_rand_seed(),
+		-- (a Plague Race: every racer's world from the same seed)
+		seed = if type(opts) == "table" and type(opts.seed) == "number" then opts.seed else self:_rand_seed(),
 		difficulty = self.difficulty,
 		tribes = tribes,
 		solo_countdown_ticks = countdown,
 		max_humans = 1,
 		time_limit_s = 0,
 		map_id = self.map_id,
-	}, self:local_display_name())
+		strain_start = if type(opts) == "table" then opts.strain_start else nil,
+		cure = if type(opts) == "table" and opts.tutorial == true then false else nil,
+		name = plague_name,
+		-- RoPlague: the shop's perks the player owns (Data/Arsenal), applied by PlagueSim
+		perks = table.clone(self.inventory.unlocks or {}),
+	}, plague_name)
+	self.solo_speed = 1.0
+end
+
+--- RoPlague: the in-game trailer's match (Trailer/Director, 2026-10-31). A local shared world like a Plague
+--- Race's: the player's plague and a rival the trailer plays itself (`plagues` = their specs, the player's
+--- first). It plays like a solo match but earns nothing: no Stars tracker, no solo report.
+function Session.start_trailer(self: any, opts: { [string]: any })
+	self:_leave_multiplayer_if_needed()
+	self.difficulty = 1
+	self.map_id = nil
+	self._trailer = true
+	local name = if type(opts.name) == "string" and opts.name ~= "" then opts.name else self:local_display_name()
+	self:_start_local(MODE_SOLO, {
+		seed = if type(opts.seed) == "number" then opts.seed else self:_rand_seed(),
+		difficulty = 1,
+		tribes = Session.SOLO_TRIBES,
+		max_humans = 1,
+		time_limit_s = 0,
+		map_id = nil,
+		mode = "race",
+		name = name,
+		plagues = opts.plagues,
+		perks = {},
+	}, name)
+	self.solo_speed = 1.0
+end
+
+--- The trailer's match only (Trailer/Director): runs fn(sim) between ticks (PlagueSim.dev_delta) and mirrors
+--- the result. False when there is no trailer match.
+function Session.trailer_apply(self: any, fn: (any) -> ()): boolean
+	local sim = self._sim
+	local state = self.state
+	if not self._trailer or self.mode ~= MODE_SOLO or sim == nil or state == nil or type(sim.dev_delta) ~= "function" then
+		return false
+	end
+	self:_settle_step()
+	if self._sim ~= sim then
+		return false
+	end
+	self:_apply(state, sim:dev_delta(fn))
+	return true
+end
+
+--- RoPlague: applies an intent to the local match at once, even while it is paused (the Evolve
+--- screen), and mirrors the result. Falls back to the normal queue when there is no local match.
+function Session.send_now(self: any, intent: { [string]: any }): boolean
+	local sim = self._sim
+	local state = self.state
+	if self.mode ~= MODE_SOLO or sim == nil or state == nil or type(sim.apply_now) ~= "function" then
+		self:send_intent(intent)
+		return false
+	end
+	self:_settle_step()
+	if self._sim ~= sim then
+		return false
+	end
+	self:_apply(state, sim:apply_now(state.local_owner, intent))
+	return true
+end
+
+--- RoPlague: renames the plague of the running solo match (the name was already filtered by
+--- server/PlagueRename). Later snapshots and news carry it.
+function Session.rename_plague(self: any, name: string)
+	local sim = self._sim
+	local state = self.state
+	if self.mode ~= MODE_SOLO or type(name) ~= "string" or name == "" then
+		return
+	end
+	if sim ~= nil and sim.plague_name ~= nil then
+		sim.plague_name = name
+	end
+	local pl = if state ~= nil then state.plague else nil
+	if pl ~= nil then
+		pl.name = name
+		local o = state.owners[pl.pid]
+		if o ~= nil then
+			o.name = name
+		end
+		state.plague_changed:Fire()
+	end
+end
+
+--- RoPlague: the solo match's speed (0 pauses; 1, 2 or 4 times). The title backdrop ignores it.
+function Session.set_speed(self: any, speed: number)
+	speed = math.clamp(tonumber(speed) or 1, 0, 8)
+	-- (a Plague Race runs at everyone's same speed, and doesn't stop)
+	if self.race ~= nil then
+		return
+	end
+	self.solo_speed = speed
+	if self.mode == MODE_SOLO and self.state_mode == MODE_SOLO then
+		self.local_speed = math.max(speed, 0)
+	end
 end
 
 --- Starts downloading map `id` unless it is available locally or already on its way. Build / join
@@ -485,7 +601,8 @@ function Session.is_building(self: any): boolean
 end
 
 function Session.set_paused(self: any, on: boolean)
-	self.paused = on
+	-- (a Plague Race never pauses: the other racers' worlds don't)
+	self.paused = on and self.race == nil
 end
 
 --- The player's equipped cosmetics on owner `id` of the local match (solo).
@@ -497,7 +614,8 @@ function Session._apply_own_cosmetics(self: any, id: number)
 	local eq = self.inventory.equipped or {}
 	-- (and their own head shot beside their name, as in a public match)
 	local uid = if type(self.env.user_id) == "function" then self.env.user_id() else 0
-	st:set_cosmetics({ [id] = { skin = eq.skin, flag = eq.flag, face = uid } }, true)
+	-- (RoPlague: and the infection colour their plague wears, an item id "shop_<strain key>")
+	st:set_cosmetics({ [id] = { skin = eq.skin, flag = eq.flag, face = uid, color = eq.color } }, true)
 end
 
 --- Does the player have Arsenal item `key`?
@@ -703,13 +821,111 @@ end
 
 --- Quick Play: a seat in the soonest public match of `mode` ("ffa" | "team" | "world"; a party leader: for the
 --- party). The hub answers with PUBLIC_STATE (in line while every match of the kind is full).
-function Session.join_public(self: any, mode: string)
+--- RoPlague: `mode` is one of its multiplayer modes (Data/PlagueModes); `role` a 1v1's side.
+function Session.join_public(self: any, mode: string, role: string?)
 	if not self:multiplayer_available() then
 		self:_emit("notice", "Multiplayer is unavailable right now. Try again in a moment.", Session.NOTICE_WARNING)
 		self:_emit("join_failed", "offline")
 		return
 	end
-	self.env.net.send(OP.JOIN_PUBLIC, mode)
+	self.env.net.send(OP.JOIN_PUBLIC, mode, role)
+end
+
+--- RoPlague: true for one of its multiplayer modes' keys (Data/PlagueModes).
+function Session._plague_mode(m: any): boolean
+	return m == "coop" or m == "race" or m == "duel" or m == "teams"
+end
+
+-- =============================================================================================
+-- RoPlague's Plague Race (Data/PlagueModes "race"; server/PlagueMatch.Race): every racer plays the same
+-- world (one seed) here on their own client; the server shows the standings and calls the winner.
+-- self.race = { seed, racers, standings, over (winner + standings) | nil, done (sent) }
+-- =============================================================================================
+
+--- Seconds between progress reports.
+Session.RACE_REPORT_S = 1.0
+
+function Session._on_race(self: any, what: any, data: any)
+	if what == "start" and type(data) == "table" then
+		local seed = math.floor(tonumber(data.seed) or 1)
+		if self.race ~= nil and self.race.seed == seed and self.mode == MODE_SOLO then
+			return -- (sent again after a reconnect: the race is on here already)
+		end
+		self.race = {
+			seed = seed,
+			racers = if type(data.racers) == "table" then data.racers else {},
+			standings = {},
+			over = nil,
+			done = false,
+			report_t = 0,
+		}
+		self:start_solo(1, nil, { seed = seed, name = self._race_name, race = true })
+		self:_emit("race_changed", self.race)
+	elseif what == "standings" and self.race ~= nil and type(data) == "table" then
+		self.race.standings = data
+		self:_emit("race_changed", self.race)
+	elseif what == "over" and self.race ~= nil and type(data) == "table" then
+		self.race.over = data
+		self.race.standings = if type(data.standings) == "table" then data.standings else self.race.standings
+		-- (everyone's world stops: the race is decided)
+		self.local_speed = 0
+		self.solo_speed = 0
+		self:_emit("race_changed", self.race)
+	elseif what == "home" then
+		-- (Studio: the race is over, back to the title here)
+		self.race = nil
+		self:start_title()
+		self:_emit("race_changed", nil)
+	end
+end
+
+--- In a race: the local match's progress to the server once a second, and its end once.
+function Session._race_report(self: any, dt: number)
+	local race = self.race
+	local st = self.state
+	if race == nil or self.mode ~= MODE_SOLO or st == nil or st.plague == nil or race.over ~= nil then
+		return
+	end
+	local net = self.env.net
+	if net == nil then
+		return
+	end
+	local p = st.plague
+	local world = math.max(1, (p.H or 0) + (p.I or 0) + (p.D or 0))
+	race.report_t += dt
+	if race.report_t >= Session.RACE_REPORT_S then
+		race.report_t = 0
+		local countries = 0
+		for _, r in p.countries or {} do
+			if (r.I or 0) >= 1 or (r.D or 0) >= 1 then
+				countries += 1
+			end
+		end
+		net.send(OP.RACE, "report", {
+			dead = (p.D or 0) / world,
+			infected = (p.I or 0) / world,
+			cure = p.cure or 0,
+			countries = countries,
+		})
+	end
+	if not race.done and st.phase == 3 then
+		race.done = true
+		local reason = st.over_reason
+		local Defs = self:_core("Defs")
+		local why = if Defs ~= nil and reason == Defs.OVER_EXTINCT
+			then "extinct"
+			elseif Defs ~= nil and reason == Defs.OVER_CURED then "cured"
+			else "burnout"
+		net.send(OP.RACE, "done", why)
+	end
+end
+
+--- RoPlague: leaving a race (or any match on the online place) goes back to the lobby place.
+function Session.leave_race(self: any)
+	local net = self.env.net
+	if net ~= nil then
+		net.send(OP.RACE, "leave")
+	end
 end
 
 --- Quick Play: leave the line.
@@ -918,6 +1134,9 @@ function Session.process(self: any, dt: number)
 	if self._sim ~= nil then
 		self:_local_process(dt)
 	end
+	if self.race ~= nil then
+		self:_race_report(dt)
+	end
 	self:_update_render_tick(dt)
 	if next(self._settings_dirty) ~= nil then
 		self:_flush_settings(false)
@@ -995,7 +1214,16 @@ Session.WARM_MODULES = {
 	"SimAI",
 	"GameState",
 	"Sim",
+	"Plague/PlagueRules",
+	"Plague/Countries",
+	"Plague/Reach",
+	"Plague/PlagueBot",
+	"Plague/PlagueSim",
+	"Plague/PlagueStars",
 }
+--- RoPlague: the simulation local matches (solo and the title backdrop) run. Multiplayer keeps RoWorld's
+--- server-side Sim.
+Session.SIM_MODULE = "Plague/PlagueSim"
 
 --- Builds the Sim, the optional human and the client mirror. Runs inside a Coop job.
 function Session._build_local(self: any, config: { [string]: any }, human_name: string, serial: number)
@@ -1005,7 +1233,7 @@ function Session._build_local(self: any, config: { [string]: any }, human_name: 
 			Coop.check()
 		end
 	end
-	local Sim = self:_core("Sim")
+	local Sim = self:_core(Session.SIM_MODULE) or self:_core("Sim")
 	local GameState = self:_core("GameState")
 	local WorldMap = self:_core("WorldMap")
 	if Sim == nil or GameState == nil or WorldMap == nil then
@@ -1019,6 +1247,11 @@ function Session._build_local(self: any, config: { [string]: any }, human_name: 
 		if SimNav ~= nil and type(SimNav.shared) == "function" then
 			SimNav.shared(map)
 		end
+		-- the country layer (decoded once per map)
+		local Countries = self:_core("Plague/Countries")
+		if Countries ~= nil then
+			Countries.get(map)
+		end
 		self._warm = true
 		Coop.check()
 	end
@@ -1027,6 +1260,9 @@ function Session._build_local(self: any, config: { [string]: any }, human_name: 
 	local id = 0
 	if human_name ~= "" then
 		id = sim:add_human("local", human_name)
+		if type(config.strain_start) == "string" and type(sim.grant_evolution) == "function" then
+			sim:grant_evolution(id, config.strain_start)
+		end
 	end
 	local snap = sim:snapshot()
 	Coop.check()
@@ -1102,7 +1338,7 @@ function Session._finish_build(self: any, r: { [string]: any })
 		self._warm_target = if self._wait_warmup then Session.WAIT_WARMUP_TICKS else Session.TITLE_WARMUP_TICKS
 		self._wait_warmup = false
 	else
-		self.local_speed = 1.0
+		self.local_speed = if self._build_mode == MODE_SOLO then (self.solo_speed or 1.0) else 1.0
 		self._warming = false
 	end
 	-- A title world that finishes building while the player is already queued for multiplayer
@@ -1124,8 +1360,20 @@ function Session._finish_build(self: any, r: { [string]: any })
 	if self._build_mode == MODE_SOLO and r.id ~= 0 then
 		self:_apply_own_cosmetics(r.id)
 		self:_apply_own_unlocks()
-		self._tracker = Stars.Tracker.new(r.sim)
-		self._tracker:watch(r.id)
+	end
+	-- (the trailer's match earns nothing: Session.start_trailer)
+	if self._build_mode == MODE_SOLO and r.id ~= 0 and not self._trailer then
+		-- (RoWorld's Stars tracker reads the war Sim's events; a plague match is followed by its own)
+		if r.sim.cs == nil then
+			self._tracker = Stars.Tracker.new(r.sim)
+			self._tracker:watch(r.id)
+		else
+			local PlagueStars = self:_core("Plague/PlagueStars")
+			if PlagueStars ~= nil then
+				self._tracker = PlagueStars.new(r.sim)
+				self._tracker:watch(r.id)
+			end
+		end
 	end
 	self:_emit("state_ready", self.state)
 	local id = r.id
@@ -1416,7 +1664,8 @@ function Session._on_net(self: any, op: number, ...: any)
 			if type(kinds) == "table" then
 				local k = {}
 				for _, m in kinds do
-					if m == "ffa" or m == "team" or m == "world" then
+					-- (RoPlague: the title's cards are its multiplayer modes, Data/PlagueModes)
+					if m == "ffa" or m == "team" or m == "world" or Session._plague_mode(m) then
 						table.insert(k, m)
 					end
 				end
@@ -1429,11 +1678,15 @@ function Session._on_net(self: any, op: number, ...: any)
 		if st == "joining" or st == "line" or st == "going" or st == "idle" then
 			self.public = {
 				state = st,
-				mode = if mode == "ffa" or mode == "team" or mode == "world" then mode else nil,
+				mode = if mode == "ffa" or mode == "team" or mode == "world" or Session._plague_mode(mode)
+					then mode
+					else nil,
 				info = if type(info) == "table" then info else nil,
 			}
 			self:_emit("public_changed", self.public)
 		end
+	elseif op == OP.RACE then
+		self:_on_race(...)
 	elseif op == OP.JOIN_RESULT then
 		local ok, reason = ...
 		if ok ~= true then
@@ -1466,6 +1719,7 @@ function Session._on_net(self: any, op: number, ...: any)
 				equipped = {
 					skin = if type(eq.skin) == "string" then eq.skin else nil,
 					flag = if type(eq.flag) == "string" then eq.flag else nil,
+					color = if type(eq.color) == "string" then eq.color else nil,
 				},
 				crates_bought = tonumber(inv.crates_bought) or 0,
 				crates_allowed = inv.crates_allowed == true,

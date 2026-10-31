@@ -122,6 +122,8 @@ function MapView.new(): MapView
 	self.tile_hovered = Signal.new()
 	self.tile_clicked = Signal.new()
 	self.tile_context = Signal.new()
+	--- RoPlague: (id) a DNA / cure bubble on the map was pressed (BubbleLayer; the UI sends the intent)
+	self.bubble_clicked = Signal.new()
 	self.territory_status_changed = Signal.new()
 	self.input_enabled = true
 
@@ -204,6 +206,9 @@ function MapView.new(): MapView
 	end
 	local moving = layer_gui("RofrontMapUnits", MapView.MAP_DISPLAY_ORDER + 1)
 	local labels = layer_gui("RofrontMapLabels", MapView.MAP_DISPLAY_ORDER + 2)
+	-- RoPlague: the bubbles sit over the names (a bubble is often at a country's label point) and are
+	-- the only map objects that take presses
+	local bubbles = layer_gui("RofrontMapBubbles", MapView.MAP_DISPLAY_ORDER + 3)
 	--- where a layer of the seldom-changing ScreenGui puts what it animates (StructureLayer's bars)
 	self.moving_overlay = moving
 	self._spawn_ring = ring(overlay, "SpawnPreview", 6)
@@ -227,9 +232,11 @@ function MapView.new(): MapView
 			{ "ranges", "RangeLayer", overlay },
 			{ "structures", "StructureLayer", overlay },
 			{ "units", "UnitLayer", moving },
+			{ "carriers", "CarrierLayer", moving },
 			{ "fx", "FxLayer", moving },
 			{ "labels", "NameLayer", labels },
 			{ "fronts", "FrontLayer", labels },
+			{ "bubbles", "BubbleLayer", bubbles },
 		}
 	do
 		local mod = optional(script.Parent, spec[2] :: string)
@@ -347,6 +354,8 @@ function MapView.bind_state(self: any, state: any)
 	self:_connect(state.snapshot_loaded, function()
 		surface:bind(state)
 		call(self.layers.glow, "on_snapshot")
+		call(self.layers.carriers, "on_snapshot")
+		call(self.layers.bubbles, "on_snapshot")
 		if self.view_rules then
 			self.view_rules.use(state.rules)
 		end
@@ -398,6 +407,35 @@ function MapView.bind_state(self: any, state: any)
 	self:_connect(state.road_removed, function(rid)
 		call(self.layers.roads, "mark_road_dirty", rid)
 	end)
+	-- RoPlague: travellers, bubbles, a country's first case, DNA gained
+	for _, pair in
+		{
+			{ "flight_added", "carriers", "on_flight_added" },
+			{ "flight_ended", "carriers", "on_flight_ended" },
+			{ "bubble_added", "bubbles", "on_bubble_added" },
+			{ "bubble_removed", "bubbles", "on_bubble_removed" },
+		}
+	do
+		if state[pair[1]] ~= nil then
+			self:_connect(state[pair[1]], function(...)
+				call(self.layers[pair[2]], pair[3], ...)
+			end)
+		end
+	end
+	if state.country_infected ~= nil then
+		self:_connect(state.country_infected, function(_c, tile)
+			if type(tile) == "number" and tile >= 0 then
+				call(self.layers.fx, "infect", tile)
+			end
+		end)
+	end
+	if state.dna_gained ~= nil then
+		self:_connect(state.dna_gained, function(amount, tile, reason)
+			if self._attract ~= true then
+				self:dna_float(tile, amount, reason)
+			end
+		end)
+	end
 	self:_connect(state.nuke_detonated, function(uid, kind, tile, radius, _owner)
 		self:_on_nuke_detonated(uid, kind, tile, radius)
 	end)
@@ -609,6 +647,18 @@ end
 -- Highlights, selection, previews
 -- ---------------------------------------------------------------------------------------------
 
+--- RoPlague's 1v1 cure: range circles to draw ({tile, range, ghost}; nil: none), FrontLayer draws them.
+function MapView.set_plague_ranges(self: any, list: { any }?)
+	self._plague_ranges = list
+end
+
+--- RoPlague's shared world: country owner id -> the plague (1..) holding it (MapSurface.set_holders).
+function MapView.set_plague_holders(self: any, held: { [number]: number }?)
+	if self.surface ~= nil then
+		self.surface:set_holders(held)
+	end
+end
+
 function MapView.set_hover_owner(self: any, id: number)
 	self._hover_owner = id
 	-- (the surface's highlight waits HOVER_DELAY_S for the pointer to rest: update())
@@ -738,6 +788,29 @@ function MapView._on_nuke_detonated(self: any, uid: number, kind: number, tile: 
 		return
 	end
 	call(fx, "nuke", kind, tile, radius)
+end
+
+--- RoPlague: a "+N [DNA]" pill rising from `tile` (BubbleLayer.pay). A popped bubble (reason 1, 4) draws
+--- its own over the bubble, so those are skipped here.
+function MapView.dna_float(self: any, tile: number, amount: number, reason: number?)
+	local st = self._state
+	local n = if st ~= nil and st.map ~= nil then st.map.N or 0 else 0
+	if type(tile) ~= "number" or type(amount) ~= "number" or tile < 0 or tile >= n or amount <= 0 then
+		return
+	end
+	if reason == 1 or reason == 4 then
+		return
+	end
+	local b = self.layers.bubbles
+	local W = st.map.W or Defs.W
+	if b ~= nil and self.rig ~= nil then
+		local x, y = self.rig:map_to_screen(tile % W + 0.5, tile // W + 0.5)
+		if self.rig:on_screen(x, y, 40) then
+			b:pay(x, y - 10, amount)
+		end
+		return
+	end
+	call(self.layers.fx, "dna", tile, amount)
 end
 
 --- Game admins: which "players" are bot players (owner id → true); nil hides the HUMAN badges.

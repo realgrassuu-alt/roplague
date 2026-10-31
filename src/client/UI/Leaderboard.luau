@@ -321,7 +321,7 @@ function Leaderboard.new(c: any)
 	c3:set_min_size(Vector2.new(50, 0))
 	c3.horizontal_alignment = W.ALIGN_RIGHT
 	self._cols:add_child(c3)
-	local c4 = T.caption("Troops", 10)
+	local c4 = T.caption("Strength", 10)
 	c4:set_min_size(Vector2.new(46, 0))
 	c4.horizontal_alignment = W.ALIGN_RIGHT
 	self._cols:add_child(c4)

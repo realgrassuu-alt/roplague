@@ -11,7 +11,8 @@ local Starter = {}
 Starter.PRODUCT = "starter_pack"
 --- What it unlocks (Data/Arsenal keys). One the player already has pays its Stars instead
 --- (Purchases.DUPLICATE_STARS_PER_ROBUX for each Robux of that item's own price).
-Starter.ITEMS = { "mega", "scatter", "stars2x" }
+-- (RoPlague: Super Spreader + Sea Legs + 2x Stars)
+Starter.ITEMS = { "super_spreader", "sea_legs", "stars2x" }
 --- How long the offer runs once seen.
 Starter.DURATION_S = 48 * 3600
 --- A purchase still lands this long after the end (a prompt opened in time and paid late).

@@ -27,6 +27,8 @@
 -- smoke and smoke with fire (DEBRIS_PLAN, looping) scattered within half its radius, 6 s, fading in
 -- over the first 10 % and out after 80 %; its ring grows to 1.5 x that radius. The radius is the
 -- look's (NUKE_FX_RADIUS), not the blast's.
+-- RoPlague: a country's first case (infect: a red pop and a wider red wave, INFECT_MIN_PX across at
+-- least) and DNA gained (dna: an orange "+3" rising like an income popup, at any zoom).
 -- Every pooled object remembers what it was last given and is written only what changed (2026-10-26,
 -- phones' slow frames: a nuke's 240 debris sprites were written six properties each a frame, with the
 -- view still and between their frames), and spent effects leave their lists in one pass, in order.
@@ -39,6 +41,8 @@ local Rules = require(Airfront:WaitForChild("Core"):WaitForChild("Rules")) :: an
 -- all new art): the explosions, the debris a nuke leaves and the conquest's flag.
 local MapFx = require(Airfront:WaitForChild("Assets"):WaitForChild("MapFx")) :: any
 local FrameClock = require(script.Parent:WaitForChild("FrameClock")) :: any
+
+local WHITE = Color3.new(1, 1, 1)
 
 local FxLayer = {}
 FxLayer.__index = FxLayer
@@ -129,7 +133,18 @@ FxLayer.WARHEAD_DEBRIS = 28
 --- how long a strike's warheads are counted together (s)
 FxLayer.WARHEAD_WINDOW_S = 10.0
 
-type Fx = { u: number, v: number, r0: number, r1: number, t0: number, dur: number, col: Color3, flash: boolean }
+--- (`px1`: the least radius on screen it grows to, px; 0 for none)
+type Fx = {
+	u: number,
+	v: number,
+	r0: number,
+	r1: number,
+	t0: number,
+	dur: number,
+	col: Color3,
+	flash: boolean,
+	px1: number,
+}
 type Pop = { u: number, v: number, t0: number, text: string, col: Color3 }
 --- The pools' GUI objects, each with what it was last given (Roblox's own values, kept here: an object
 --- shown for another effect still shows them, so nothing needs resetting; `vis` its Visible).
@@ -186,12 +201,14 @@ type BurstGui = {
 	oy: number,
 	img_t: number,
 }
-type Bonus = { u: number, v: number, t0: number, text: string }
+--- (`col`: the text's colour, white when nil; `always`: shown at any zoom)
+type Bonus = { u: number, v: number, t0: number, text: string, col: Color3?, always: boolean?, big: boolean? }
 type BonusGui = {
 	label: TextLabel,
 	stroke: UIStroke,
 	vis: boolean,
 	text: string?,
+	col: Color3?,
 	size: number,
 	x: number,
 	y: number,
@@ -281,7 +298,16 @@ function FxLayer.destroy(self: any)
 	self.root:Destroy()
 end
 
-local function add(self: any, tile: number, r0: number, r1: number, dur: number, col: Color3, flash: boolean)
+local function add(
+	self: any,
+	tile: number,
+	r0: number,
+	r1: number,
+	dur: number,
+	col: Color3,
+	flash: boolean,
+	px1: number?
+)
 	local st = self._state
 	if st == nil or tile < 0 then
 		return
@@ -296,6 +322,7 @@ local function add(self: any, tile: number, r0: number, r1: number, dur: number,
 		dur = dur,
 		col = col,
 		flash = flash,
+		px1 = px1 or 0,
 	})
 end
 
@@ -439,6 +466,22 @@ function FxLayer.pop(self: any, tile: number, col: Color3?)
 	add(self, tile, 0, FxLayer.POP_RADIUS / k * 0.25, FxLayer.POP_S, col or Color3.new(1, 0.6, 0.25), false)
 end
 
+--- RoPlague: a country's first case at `tile` (GameState.country_infected): a red pop and a wider
+--- red wave behind it, INFECT_MIN_PX across on screen at least so a zoomed-out map shows it.
+FxLayer.INFECT_COLOR = Color3.fromRGB(255, 48, 40)
+FxLayer.INFECT_WAVE = Color3.fromRGB(255, 120, 90)
+FxLayer.INFECT_RADIUS = 34 -- full-size tiles
+FxLayer.INFECT_S = 1.3
+FxLayer.INFECT_MIN_PX = 30
+function FxLayer.infect(self: any, tile: number)
+	local st = self._state
+	local k = tonumber(st and st.map and st.map.k_lin) or Rules.K_LIN
+	self:pop(tile, FxLayer.INFECT_COLOR)
+	add(self, tile, 0, FxLayer.INFECT_RADIUS / k, FxLayer.INFECT_S, FxLayer.INFECT_COLOR, false, FxLayer.INFECT_MIN_PX)
+	-- a second, slower and wider wave: the plague settling into the country
+	add(self, tile, 0, FxLayer.INFECT_RADIUS * 1.8 / k, FxLayer.INFECT_S * 1.9, FxLayer.INFECT_WAVE, false, FxLayer.INFECT_MIN_PX * 2)
+end
+
 --- An explosion sprite (BURSTS) at map position (u, v) (tile + 0.5 is the tile's centre).
 function FxLayer.burst(self: any, kind: string, u: number, v: number)
 	local row = FxLayer.BURSTS[kind]
@@ -519,6 +562,32 @@ function FxLayer.bonus(self: any, tile: number, gold: number)
 	})
 end
 
+--- RoPlague: DNA gained at `tile`: an orange "+N" rising from it like an income popup (shown at any
+--- zoom: DNA is rare and it is the player's own).
+FxLayer.DNA_COLOR = Color3.fromRGB(255, 176, 70)
+FxLayer.DNA_MIN_PX = 22
+function FxLayer.dna(self: any, tile: number, amount: number)
+	local st = self._state
+	if st == nil or tile < 0 or tile >= (st.map.N or Defs.TILE_COUNT) or amount <= 0 then
+		return
+	end
+	local W = st.map.W or Defs.W
+	local list = self._bonus
+	if #list >= FxLayer.BONUS_MAX then
+		table.remove(list, 1)
+	end
+	local n = math.floor(amount * 10 + 0.5) / 10
+	table.insert(list, {
+		u = tile % W + 0.5,
+		v = tile // W + 0.5,
+		t0 = FrameClock.now(),
+		text = "+" .. (if n == math.floor(n) then tostring(math.floor(n)) else string.format("%.1f", n)) .. " DNA",
+		col = FxLayer.DNA_COLOR,
+		big = true,
+		always = true,
+	})
+end
+
 --- Drop a list's entries from n + 1 on (the spent ones were left behind as the live ones moved up).
 local function truncate(list: { any }, n: number)
 	for i = #list, n + 1, -1 do
@@ -541,10 +610,14 @@ local function bonus_step(self: any, cam: any, now: number)
 		end
 		keep += 1
 		list[keep] = b
-		if zoom < FxLayer.BONUS_CULL_ZOOM then
+		if zoom < FxLayer.BONUS_CULL_ZOOM and not b.always then
 			continue
 		end
 		local fs = math.clamp(FxLayer.BONUS_SIZE * zoom, FxLayer.BONUS_MIN_PX, FxLayer.BONUS_MAX_PX)
+		if b.big then
+			-- (RoPlague: DNA gained reads big at any zoom)
+			fs = math.max(fs, FxLayer.DNA_MIN_PX)
+		end
 		-- (offset and rise are in tiles; under the minimum size they keep pace with the text)
 		local unit = fs / FxLayer.BONUS_SIZE
 		local x, y = cam:map_to_screen(b.u, b.v)
@@ -574,6 +647,7 @@ local function bonus_step(self: any, cam: any, now: number)
 				stroke = stroke,
 				vis = true,
 				text = nil,
+				col = nil,
 				size = -1,
 				x = math.huge,
 				y = math.huge,
@@ -593,6 +667,11 @@ local function bonus_step(self: any, cam: any, now: number)
 		if g.text ~= b.text then
 			g.text = b.text
 			label.Text = b.text
+		end
+		local col = b.col or WHITE
+		if g.col ~= col then
+			g.col = col
+			label.TextColor3 = col
 		end
 		if g.size ~= fs then
 			g.size = fs
@@ -926,7 +1005,7 @@ function FxLayer.tick(self: any, _dt: number)
 		list[keep] = fx
 		local x, y = cam:map_to_screen(fx.u, fx.v)
 		local e = 1 - (1 - t) ^ 3
-		local r = (fx.r0 + (fx.r1 - fx.r0) * e) * cam.scale
+		local r = math.max((fx.r0 + (fx.r1 - fx.r0) * e) * cam.scale, fx.px1 * 0.5 * e)
 		if not cam:on_screen(x, y, r) then
 			continue
 		end

@@ -118,7 +118,7 @@ function ArsenalButton._build(self)
 	local pt = new("TextLabel", {
 		BackgroundTransparency = 1,
 		Size = UDim2.fromScale(1, 1),
-		Text = "ARSENAL",
+		Text = "SHOP",
 		FontFace = FONT_B,
 		TextColor3 = Color3.fromRGB(46, 26, 4),
 		TextScaled = true,

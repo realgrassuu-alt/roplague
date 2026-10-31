@@ -101,6 +101,12 @@ function FillBar._on_geometry(self)
 	self:_redraw()
 end
 
+--- The fill's colour (RoPlague's cure bar turns from amber to blue).
+function FillBar.set_color(self, c: any)
+	self.fill_color = c
+	self:_redraw()
+end
+
 function FillBar._restyle(self)
 	self:_redraw()
 end

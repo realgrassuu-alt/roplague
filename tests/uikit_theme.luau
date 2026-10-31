@@ -61,7 +61,7 @@ eq(T.line_height(20), 24, "line_height 20")
 eq(T.ui_scale(Vector2.new(1920, 1080), false), 1.2, "ui_scale 1080p")
 eq(T.ui_scale(Vector2.new(1600, 900), false), 1.0, "ui_scale 900p")
 assert(math.abs(T.ui_scale(Vector2.new(1366, 768), false) - 0.85333) < 1e-3, "ui_scale 768p")
-eq(T.ui_scale(Vector2.new(844, 390), true), 1.0, "ui_scale phone")
+assert(math.abs(T.ui_scale(Vector2.new(844, 390), true) - 0.43333) < 1e-3, "ui_scale phone: the same design, scaled to fit")
 
 -- styles
 local st = T.flat(T.GLASS, T.R_LG, T.LINE, 1, 16, 12)

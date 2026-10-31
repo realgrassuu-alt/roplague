@@ -9,6 +9,16 @@ if type(dev) == "string" and dev ~= "" then
 		return
 	end
 end
+-- RoPlague: the Rename-your-plague gamepass (server/PlagueRename)
+local Rename = script:FindFirstChild("PlagueRename")
+if Rename then
+	local ok, err = pcall(function()
+		require(Rename).start()
+	end)
+	if not ok then
+		warn("[RoPlague] rename service failed:", err)
+	end
+end
 local Server = script:FindFirstChild("ServerMain")
 if Server then
 	require(Server).start()

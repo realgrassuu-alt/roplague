@@ -562,7 +562,7 @@ function UIRules.availability(self: any, kind: string): { [string]: any }
 		return out
 	end
 	if not o.spawned then
-		out.reason = "Place your capital first"
+		out.reason = "Place patient zero first"
 		out.locked = true
 		return out
 	end
@@ -1081,7 +1081,7 @@ function UIRules._primary(self: any, tile: number): { [string]: any }
 	if troops < 1.0 then
 		-- (the floor under a new player's army: UICtx.troop_floor)
 		out.floor = share < ctx.ratio
-		out.reason = if out.floor then UICtx.data("Tutorial").FLOOR_REASON else "No troops available"
+		out.reason = if out.floor then UICtx.data("Tutorial").FLOOR_REASON else "No infected available"
 		return out
 	end
 	local land = false
@@ -1096,7 +1096,7 @@ function UIRules._primary(self: any, tile: number): { [string]: any }
 	if land then
 		out.type = if own == 0 then "expand" else "attack"
 		out.ok = true
-		out.verb = if own == 0 then (if fallout then "Expand into fallout" else "Expand") else "Attack"
+		out.verb = if own == 0 then (if fallout then "Infect fallout" else "Infect") else "Infect"
 		out.icon = "attack"
 		return out
 	end
@@ -1116,7 +1116,7 @@ function UIRules._primary(self: any, tile: number): { [string]: any }
 		out.icon = "boat"
 		return out
 	end
-	out.reason = if own == 0 then "Out of reach: expand toward it" else "No border or sea route"
+	out.reason = if own == 0 then "Out of reach: spread toward it" else "No border or sea route"
 	return out
 end
 
@@ -1198,7 +1198,7 @@ function UIRules.radial_items(self: any, tile: number): { { [string]: any } }
 	if playing and land and own ~= me and not s:are_allies(me, own) then
 		local p = self:primary(tile)
 		local is_boat = tostring(p.type) == "boat"
-		local verb = if own == 0 then "Expand" else "Attack"
+		local verb = "Infect"
 		local atk =
 			{ id = "attack", label = verb, icon = "attack", ok = p.ok and not is_boat, reason = "", danger = false }
 		if is_boat then
@@ -1215,7 +1215,7 @@ function UIRules.radial_items(self: any, tile: number): { { [string]: any } }
 		elseif self:transports() >= Rules().MAX_BOATS_PLAYER then
 			boat.reason = "All transports are at sea"
 		elseif ctx:troops_for_ratio() < 1.0 then
-			boat.reason = "No troops available"
+			boat.reason = "No infected available"
 		else
 			boat.ok = true
 		end
@@ -1321,7 +1321,7 @@ function UIRules.radial_items(self: any, tile: number): { { [string]: any } }
 				label = "Donate",
 				icon = "donate",
 				ok = plan.want >= 1 and not plan.full,
-				reason = if plan.want < 1 then "No troops to spare" elseif plan.full then "At their troop cap" else "",
+				reason = if plan.want < 1 then "No infected to spare" elseif plan.full then "At their troop cap" else "",
 				danger = false,
 				troops = plan.amount,
 				capped = plan.capped,

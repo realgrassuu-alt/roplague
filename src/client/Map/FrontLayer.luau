@@ -243,6 +243,38 @@ function FrontLayer._poll_fronts(self: any, now: number)
 	for _, e in self._entries do
 		e.seen = false
 	end
+	if st ~= nil and me ~= 0 and st.plague ~= nil and type(st.shared_world) == "function" and st:shared_world() then
+		-- RoPlague's shared world: the attackers' count at each attack's front tile (the sim puts it on
+		-- the border, or where the ship landed), RoWorld's blue for yours and red for one on you
+		local W = st.map.W or Defs.W
+		for aid, a in st.attacks do
+			local incoming = a.target == me
+			if (a.attacker == me or incoming) and (a.anchor_tile or -1) >= 0 then
+				local e = self._entries[aid]
+				local nx, ny = a.anchor_tile % W + 0.5, a.anchor_tile // W + 0.5
+				if e == nil then
+					e = { text = "", incoming = incoming, slots = { { cx = nx, cy = ny, sx = nx, sy = ny, dx = nx, dy = ny, t0 = now } }, seen = true }
+					self._entries[aid] = e
+				else
+					-- (the front moved: the count glides after it)
+					local s = e.slots[1]
+					if s.dx ~= nx or s.dy ~= ny then
+						s.sx, s.sy = s.cx, s.cy
+						s.dx, s.dy, s.t0 = nx, ny, now
+					end
+				end
+				e.seen = true
+				e.incoming = incoming
+				e.text = NumberFormat.render_troops(a.troops)
+			end
+		end
+		for aid, e in self._entries do
+			if not e.seen then
+				self._entries[aid] = nil
+			end
+		end
+		return
+	end
 	if st == nil or me == 0 or tracker == nil or tracker.me ~= me then
 		table.clear(self._entries)
 		return
@@ -359,8 +391,60 @@ local function label(self: any, n: number): Label
 	return rec :: Label
 end
 
+--- RoPlague's 1v1 cure placing a building: its range under the cursor (bright) and its other buildings'
+--- (faint), as RoWorld shows a structure's range while it is placed (MapView.set_plague_ranges).
+function FrontLayer._ranges(self: any)
+	local list = self.view._plague_ranges
+	local pool = self._range_pool
+	if pool == nil then
+		pool = {}
+		self._range_pool = pool
+	end
+	local n = 0
+	local st = self._state
+	if list ~= nil and st ~= nil and st.map ~= nil then
+		local cam = self.view.rig
+		local W = st.map.W or Defs.W
+		local k = tonumber(st.map.k_lin) or Rules.K_LIN
+		for _, r in list do
+			local x, y = cam:map_to_screen(r.tile % W + 0.5, r.tile // W + 0.5)
+			local rad = r.range * cam.scale / k
+			n += 1
+			local f = pool[n]
+			if f == nil then
+				f = Instance.new("Frame")
+				f.Name = "PlagueRange"
+				f.AnchorPoint = Vector2.new(0.5, 0.5)
+				f.BorderSizePixel = 0
+				f.ZIndex = FrontLayer.Z - 1
+				local corner = Instance.new("UICorner")
+				corner.CornerRadius = UDim.new(0.5, 0)
+				corner.Parent = f
+				local stroke = Instance.new("UIStroke")
+				stroke.Name = "Rim"
+				stroke.Thickness = 2
+				stroke.Parent = f
+				f.Parent = self.root
+				pool[n] = f
+			end
+			local col = if r.ghost then Color3.fromRGB(110, 220, 255) else Color3.fromRGB(80, 170, 220)
+			f.BackgroundColor3 = col
+			f.BackgroundTransparency = if r.ghost then 0.82 else 0.92
+			f.Rim.Color = col
+			f.Rim.Transparency = if r.ghost then 0.1 else 0.55
+			f.Position = UDim2.fromOffset(x, y)
+			f.Size = UDim2.fromOffset(rad * 2, rad * 2)
+			f.Visible = true
+		end
+	end
+	for i = n + 1, #pool do
+		pool[i].Visible = false
+	end
+end
+
 function FrontLayer.tick(self: any, dt: number)
 	local now = FrameClock.now()
+	self:_ranges()
 	self._poll -= dt
 	if self._poll <= 0 then
 		self._poll = FrontLayer.POLL_S

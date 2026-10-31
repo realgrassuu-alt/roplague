@@ -7,3 +7,6 @@ __pycache__/
 assets/audio/
 .claude/worktrees/
 src/server/Lobbies/Secret.luau
+
+# RoPlague: private working notes, not part of the game
+CLAUDE.md

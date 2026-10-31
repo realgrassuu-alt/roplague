@@ -122,7 +122,7 @@ function CommandBar._build_sections(self)
 	self._troops_box = T.vbox(3)
 	local tr = T.hbox(6)
 	tr:add_child(T.icon_rect("troops", 12.0, T.TEXT_3))
-	tr:add_child(T.caption("Troops"))
+	tr:add_child(T.caption("Infected"))
 	tr:add_child(spacer())
 	self._growth = T.label("+0/s", 11, 700, T.GREEN)
 	tr:add_child(self._growth)
@@ -151,7 +151,7 @@ function CommandBar._build_sections(self)
 	self._gold_box = T.vbox(3)
 	local gr = T.hbox(6)
 	gr:add_child(T.icon_rect("gold", 12.0, T.TEXT_3))
-	gr:add_child(T.caption("Gold"))
+	gr:add_child(T.caption("DNA"))
 	gr:add_child(spacer())
 	self._income = T.label("+0/s", 11, 700, T.GREEN)
 	gr:add_child(self._income)
@@ -192,7 +192,7 @@ function CommandBar._build_sections(self)
 	line:add_child(self._ratio_inline_box)
 	self._ratio_line = line
 	self._ratio_box:add_child(line)
-	self._ratio_sub = T.label("Sends 0 troops", 11, 500, T.TEXT_3)
+	self._ratio_sub = T.label("Sends 0 infected", 11, 500, T.TEXT_3)
 	self._ratio_box:add_child(self._ratio_sub)
 	self._ratio_box:set_min_size(Vector2.new(176, 0))
 	self._ratio_box:set_mouse_filter(W.MOUSE_PASS)
@@ -401,8 +401,8 @@ function CommandBar._apply_fixed_widths(self, compact: boolean)
 	T.fix_width(self._committed, w_war, W.ALIGN_RIGHT)
 	T.fix_width(self._gold, w_gold)
 	T.fix_width(self._income, w_rate, W.ALIGN_RIGHT)
-	local cap_troops = T.text_width("TROOPS", small, 700) + 6.0
-	local cap_gold = T.text_width("GOLD", small, 700) + 4.0
+	local cap_troops = T.text_width("INFECTED", small, 700) + 6.0
+	local cap_gold = T.text_width("DNA", small, 700) + 4.0
 	local troops_w = math.max(w_val + 5.0 + w_cap, 12.0 + 6.0 + cap_troops + 8.0 + w_rate)
 	troops_w = math.max(troops_w, 40.0 + 6.0 + w_war)
 	self._troops_box:set_min_size(Vector2.new(troops_w, 0))
@@ -821,14 +821,14 @@ function CommandBar.stats_spec(self): { [string]: any }
 		return {}
 	end
 	local rows: { any } = {
-		{ "Troops", string.format("%s / %s", T.fmt_troops(o.troops), T.fmt_troops(o.max_troops)) },
+		{ "Infected", string.format("%s / %s", T.fmt_troops(o.troops), T.fmt_troops(o.max_troops)) },
 		{ "Growth", self._growth.text, if self._rate_up then T.GREEN else T.ORANGE },
 	}
 	local at_war = self:_committed_troops()
 	if at_war > 0 then
 		table.insert(rows, { "At war", T.fmt_troops(at_war), T.ORANGE })
 	end
-	table.insert(rows, { "Gold", T.fmt_num(o.gold), T.GOLD })
+	table.insert(rows, { "DNA", T.fmt_num(o.gold), T.GOLD })
 	table.insert(rows, { "Income", T.fmt_rate(o.income), if o.income > 0 then T.GREEN else T.TEXT_3 })
 	table.insert(rows, { "Land", T.fmt_pct(s:land_share(o.id)) })
 	local pct = ctx.ratio * 100
@@ -918,7 +918,7 @@ function CommandBar._refresh_ratio(self)
 	local pct = math.floor(ctx.ratio * 100 + 0.5)
 	self._ratio_pct:set_text(string.format("%d%%", pct))
 	self._ratio_sends:set_text(T.fmt_troops(ctx:troops_for_ratio()))
-	self._ratio_sub:set_text(string.format("Sends %s troops", T.fmt_troops(ctx:troops_for_ratio())))
+	self._ratio_sub:set_text(string.format("Sends %s infected", T.fmt_troops(ctx:troops_for_ratio())))
 end
 
 --- Per frame (GDScript _process).

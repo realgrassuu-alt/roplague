@@ -259,6 +259,9 @@ def write_manifest(music, sfx, note):
 # ------------------------------------------------------------------------------------------------
 
 def main():
+    # RoPlague (2026-10-31): RoWorld's sounds may not be used (their owner said no). This script
+    # would upload them and write their ids back into src/shared/Assets, so it refuses to run.
+    sys.exit("RoPlague does not use RoWorld's sounds: see Assets/Audio.luau (Creator Store sounds).")
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
     ap.add_argument("--dry-run", action="store_true")

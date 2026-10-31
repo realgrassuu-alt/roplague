@@ -28,6 +28,15 @@ local Cosmetics = shared("Cosmetics")
 local ShopLayout = require("./ShopLayout")
 local Products = shared("Products")
 
+
+--- RoPlague: the colour shop's swatches carry the plague's virus glyph (Assets/PlagueIcons)
+local VIRUS_ICON: string = (function()
+	local ok, m = pcall(function()
+		return require(game:GetService("ReplicatedStorage"):WaitForChild("Airfront").Assets.PlagueIcons)
+	end)
+	return if ok and type(m) == "table" then (m.virus or "") else ""
+end)()
+
 local FlagShop = W.class(W.Control)
 
 --- A card, logical px (phones: CARD_PHONE).
@@ -140,10 +149,10 @@ function FlagShop.new(c: any)
 	self._v = v
 	self._panel:add_child(v)
 	local head = UITheme.hbox(12)
-	local title = UITheme.label("FLAG SHOP", 20, 800, UITheme.TEXT, 3)
+	local title = UITheme.label("COLOUR SHOP", 20, 800, UITheme.TEXT, 3)
 	title.size_flags_vertical = W.SHRINK_CENTER
 	head:add_child(title)
-	self._sub = UITheme.label("New flags every day", 13, 600, UITheme.TEXT_2)
+	self._sub = UITheme.label("Paint your plague: new colours every day", 13, 600, UITheme.TEXT_2)
 	self._sub.size_flags_horizontal = W.EXPAND_FILL
 	self._sub.size_flags_vertical = W.SHRINK_CENTER
 	head:add_child(self._sub)
@@ -226,9 +235,9 @@ function FlagShop._pressed(self, key: string)
 	local inv = self:_inv()
 	local se = self.ctx.session
 	if inv.owned[id] == true then
-		if inv.equipped.flag ~= id and se ~= nil then
+		if inv.equipped.color ~= id and se ~= nil then
 			self.ctx:sfx("click")
-			se:equip("flag", id)
+			se:equip("color", id)
 		end
 		return
 	end
@@ -314,19 +323,29 @@ end
 
 function FlagShop._on_inventory(self)
 	local p = self._pending
+	-- (what was paid for arriving ends the wait even before Roblox's prompt-closed event, which
+	-- comes only once its "bought" sheet is dismissed)
+	if p ~= nil and p.phase == "prompt" then
+		local got = if p.set ~= nil
+			then select(1, self:_set_owned(p.set)) >= select(2, self:_set_owned(p.set))
+			else self:_inv().owned[Shop.item_id(p.key)] == true
+		if got then
+			p.phase = "grant"
+		end
+	end
 	if p ~= nil and p.phase == "grant" and p.set ~= nil then
 		local n, of = self:_set_owned(p.set)
 		if n >= of then
 			self._pending = nil
 			local set = Shop.SETS[p.set]
 			self.ctx:sfx("confirm")
-			self:_toast(string.format("All %d %s flags are yours.", of, if set then set.name else ""))
+			self:_toast(string.format("All %d %s colours are yours.", of, if set then set.name else ""))
 		end
 	elseif p ~= nil and p.phase == "grant" and self:_inv().owned[Shop.item_id(p.key)] == true then
 		self._pending = nil
 		local f = Shop.flag(p.key)
 		self.ctx:sfx("confirm")
-		self:_toast((if f then f.name else "Your flag") .. " is yours: you're wearing it now.")
+		self:_toast((if f then f.name else "Your colour") .. " is yours: your plague wears it now.")
 	end
 	if self.is_open then
 		self:_rebuild()
@@ -338,7 +357,7 @@ function FlagShop.tick(self)
 	if p ~= nil then
 		local limit = if p.phase == "prompt" then 180 else FlagShop.GRANT_WAIT_S
 		if os.clock() - p.since > limit then
-			self:_cancel(if p.phase == "prompt" then nil else "Your flag is on its way: it shows up in a moment.")
+			self:_cancel(if p.phase == "prompt" then nil else "Your colour is on its way: it shows up in a moment.")
 		end
 	end
 end
@@ -470,7 +489,7 @@ function FlagShop._bundle(self, order: number, sid: string)
 	local title = new("TextLabel", {
 		BackgroundTransparency = 1,
 		FontFace = FONT_H,
-		Text = string.format("ALL %d %s FLAGS", of, string.upper(set.name)),
+		Text = string.format("ALL %d %s COLOURS", of, string.upper(set.name)),
 		TextColor3 = WHITE,
 		TextSize = px(14),
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -561,7 +580,7 @@ function FlagShop._card(self, parent: Instance, key: string, pos: Vector2, size:
 	local cs = size
 	local inv = self:_inv()
 	local owned = inv.owned[it.id] == true
-	local wearing = inv.equipped.flag == it.id
+	local wearing = inv.equipped.color == it.id
 	local pending = self._pending ~= nil and self._pending.key == key
 	local rar = Cosmetics.rarity(f.rarity)
 	local rc = c3(rar.color)
@@ -584,18 +603,28 @@ function FlagShop._card(self, parent: Instance, key: string, pos: Vector2, size:
 	}, card)
 	local fw = cs.X - 16
 	local fh = math.floor(fw * 2 / 3)
-	local img = new("ImageLabel", {
-		Name = "Flag",
-		BackgroundTransparency = 1,
+	-- (RoPlague: the colour itself, with the plague's virus over it)
+	local img = new("Frame", {
+		Name = "Swatch",
+		BorderSizePixel = 0,
 		Position = UDim2.fromOffset(px(8), px(8)),
 		Size = UDim2.fromOffset(px(fw), px(fh)),
 		ZIndex = 42,
 	}, card)
-	local image, x, y, w, h = Cosmetics.flag_big(it)
-	img.Image = image
-	img.ImageRectOffset = Vector2.new(x, y)
-	img.ImageRectSize = Vector2.new(w, h)
+	Cosmetics.swatch(it, img)
 	new("UICorner", { CornerRadius = UDim.new(0, px(6)) }, img)
+	new("UIStroke", { Color = WHITE, Transparency = 0.6, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, img)
+	local glyph = new("ImageLabel", {
+		Name = "Virus",
+		BackgroundTransparency = 1,
+		Image = VIRUS_ICON,
+		ImageColor3 = WHITE,
+		ImageTransparency = 0.15,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(px(fh * 0.62), px(fh * 0.62)),
+		ZIndex = 43,
+	}, img)
 	local name_size = if hero then (if self.ctx.compact then 15 else 18) else (if self.ctx.compact then 11 else 13)
 	local name = new("TextLabel", {
 		BackgroundTransparency = 1,
@@ -686,7 +715,8 @@ function FlagShop._card(self, parent: Instance, key: string, pos: Vector2, size:
 	local host = self._host
 	host:_part(card, "BackgroundTransparency", 1.0)
 	host:_part(stroke, "Transparency", if wearing then 1.0 else 0.55)
-	host:_part(img, "ImageTransparency", 1.0)
+	host:_part(img, "BackgroundTransparency", 1.0)
+	host:_part(glyph, "ImageTransparency", 1.0)
 	host:_part(name, "TextTransparency", 1.0)
 	host:_part(sub, "TextTransparency", 1.0)
 	host:_part(label, "TextTransparency", 1.0)
@@ -736,7 +766,7 @@ function FlagShop._rebuild(self)
 		table.insert(keys, "shopset_" .. set.id)
 	end
 	order += 1
-	self:_section(order, "TODAY'S FLAGS", WHITE, (c.day + 1) * Shop.DAY_S, "NEW IN ")
+	self:_section(order, "TODAY'S COLOURS", WHITE, (c.day + 1) * Shop.DAY_S, "NEW IN ")
 	order += 1
 	self:_grid(order, c.daily)
 	for _, k in c.daily do

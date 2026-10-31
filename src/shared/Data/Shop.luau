@@ -14,16 +14,21 @@
 --                    suggestions: the set's 6 flags as one bundle at a discount).
 --
 -- A receipt grants its flag whenever it comes (the prompt may close after the shop turned over).
+--
+-- RoPlague (2026-10-29): the shop sells INFECTION COLOURS (Data/Strains) instead of country flags; a
+-- plague has no flag, it has a colour. The rotation, the sets and the bundles are RoWorld's; an item is
+-- still called a "flag" in the code (Shop.flags, "shopflag:<key>" receipts) so the machinery is unchanged.
 local IS_ROBLOX = typeof(game) == "Instance"
-local ShopFlags: any = if IS_ROBLOX
-	then require((game :: any):GetService("ReplicatedStorage"):WaitForChild("Airfront").Assets.ShopFlags)
-	else require("../Assets/ShopFlags")
+local Strains: any = if IS_ROBLOX
+	then require((script :: any).Parent.Strains)
+	else (require :: any)("./Strains")
 
 local Shop = {}
 
 Shop.DAY_S = 86400
---- Flags in the daily shop.
-Shop.DAILY = 4
+--- Flags in the daily shop (RoPlague: 3 colours a day from a pool of 15, so a cycle is 5 days and its
+--- first day never repeats the day before: Shop.daily needs days >= DAILY + 2).
+Shop.DAILY = 3
 --- Robux by rarity (each flag's product is created at its rarity's price: make_shop_flags.py).
 Shop.PRICES = { rare = 49, epic = 99, legendary = 149 }
 --- The item id prefix (Data/Cosmetics).
@@ -32,8 +37,8 @@ Shop.ITEM_PREFIX = "shop_"
 --- Limited sets: on sale whole from `from` to `to` (Unix seconds, UTC); `bundle`: the Robux of all of
 --- it at once (its product: Assets/ShopFlags `sets`).
 Shop.SETS = {
-	-- 2026-10-22 .. 2026-11-03; all 6 for 299 (544 one by one)
-	halloween = { name = "Halloween", from = 1792627200, to = 1793664000, bundle = 299 },
+	-- 2026-10-22 .. 2026-11-03; its 4 colours for 199 (446 one by one)
+	halloween = { name = "Halloween", from = 1792627200, to = 1793664000, bundle = 199 },
 }
 
 type Flag = { key: string, name: string, rarity: string, theme: string, set: string?, [string]: any }
@@ -41,11 +46,14 @@ type Flag = { key: string, name: string, rarity: string, theme: string, set: str
 local flags: { Flag } = {}
 local by_key: { [string]: Flag } = {}
 local pool: { string } = {}
-for _, f in (ShopFlags.flags or {}) :: { any } do
-	table.insert(flags, f)
-	by_key[f.key] = f
-	if f.set == nil then
-		table.insert(pool, f.key)
+for _, s in Strains.LIST :: { any } do
+	if s.rarity ~= "free" and not s.crate then
+		local f = { key = s.key, name = s.name, rarity = s.rarity, theme = "colour", set = s.set, product = s.product }
+		table.insert(flags, f)
+		by_key[f.key] = f
+		if f.set == nil then
+			table.insert(pool, f.key)
+		end
 	end
 end
 table.sort(pool)
@@ -216,8 +224,8 @@ end
 
 --- Set `id`'s bundle product ids: (production, Rofront Staging); 0 = not made yet.
 function Shop.bundle_ids(id: string): (number, number)
-	local s = (ShopFlags.sets or {})[id]
-	return if s then s.product or 0 else 0, if s then s.staging or 0 else 0
+	local s = (Strains.SETS or {})[id]
+	return if s then s.product or 0 else 0, 0
 end
 
 --- Set `id`'s flags bought one by one (Robux).

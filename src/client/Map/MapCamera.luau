@@ -310,6 +310,28 @@ function MapCamera._clamp(self: MapCamera)
 	self.cu = clamp_axis(self.cu, self.W, a.X / s, (self._vp.X - a.X) / s)
 end
 
+--- RoPlague: the title screen's drift only ever shows the map, never the grey past its edges (on a tall
+--- screen the map at its title zoom was shorter than the view, and the drift went past its top corners):
+--- at least zoomed in enough to cover the view, and kept wholly inside the map.
+function MapCamera._attract_fit(self: MapCamera)
+	local vp = self._vp
+	local cover = math.max(vp.X / self.W, vp.Y / self.H) * 1.02
+	if self.scale < cover then
+		self.scale = math.min(cover, self:max_scale())
+		self.target_scale = self.scale
+	end
+	local a = self:anchor_px()
+	local s = self.scale
+	local u0, u1 = a.X / s, self.W - (vp.X - a.X) / s
+	local v0, v1 = a.Y / s, self.H - (vp.Y - a.Y) / s
+	if u0 <= u1 then
+		self.cu = math.clamp(self.cu, u0, u1)
+	end
+	if v0 <= v1 then
+		self.cv = math.clamp(self.cv, v0, v1)
+	end
+end
+
 function MapCamera._bump(self: MapCamera)
 	self.version += 1
 	self.lat = 90.0 - self.cv / self.H * 180.0
@@ -530,6 +552,7 @@ function MapCamera.tick(self: MapCamera, dt: number)
 		local before = self.cu
 		self.cu += dir * dt * 6.0 * (self:min_scale() / self.scale)
 		self:_clamp()
+		self:_attract_fit()
 		if math.abs(self.cu - before) < 1e-6 then
 			self._drift = -dir
 		end

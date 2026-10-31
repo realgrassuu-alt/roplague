@@ -20,6 +20,31 @@ local Core = RS:WaitForChild("Airfront"):WaitForChild("Core")
 local Defs = require(Core:WaitForChild("Defs")) :: any
 local Rules = require(Core:WaitForChild("Rules")) :: any
 local NumberFormat = require(Core:WaitForChild("NumberFormat")) :: any
+
+--- RoPlague: the line under a country's name.
+local PLAGUE_RED = Color3.fromRGB(255, 92, 86)
+local PLAGUE_CLEAN = Color3.fromRGB(228, 232, 240)
+local PLAGUE_DEAD = Color3.fromRGB(150, 150, 165)
+--- RoPlague: the "N DEAD" line under the infected one (once the plague has killed someone there).
+local PLAGUE_KILLED = Color3.fromRGB(196, 196, 210)
+local PLAGUE_INK = Color3.fromRGB(24, 10, 14)
+
+--- RoPlague: an infected count under a country's name ("" for none; 12.3K, 4.5M, 1.20B).
+local function plague_people(n: number): string
+	n = math.floor((tonumber(n) or 0) + 0.5)
+	if n < 1 then
+		return ""
+	elseif n >= 1e9 then
+		return string.format("%.2fB", n / 1e9)
+	elseif n >= 1e6 then
+		return string.format("%.1fM", n / 1e6)
+	elseif n >= 1e4 then
+		return string.format("%.0fK", n / 1e3)
+	elseif n >= 1e3 then
+		return string.format("%.1fK", n / 1e3)
+	end
+	return tostring(n)
+end
 local Sprites = require(RS:WaitForChild("Airfront"):WaitForChild("Assets"):WaitForChild("MapSprites")) :: any
 local Cosmetics = require(RS:WaitForChild("Airfront"):WaitForChild("Data"):WaitForChild("Cosmetics")) :: any
 local Coop = require(RS:WaitForChild("Airfront"):WaitForChild("Net"):WaitForChild("Coop")) :: any
@@ -35,6 +60,10 @@ NameLayer.FONT = Font.fromId(12187365977, Enum.FontWeight.Bold)
 NameLayer.NAME_SCALE_FACTOR = 0.4
 NameLayer.NAME_SCALE_CAP = 3.0
 NameLayer.TROOP_SIZE_MULT = 0.6
+--- RoPlague: the line under a country's name (UNINFECTED / 1.2M INFECTED) is smaller than the troops line.
+NameLayer.PLAGUE_LINE_MULT = 0.36
+NameLayer.PLAGUE_LINE_MIN_PX = 7
+NameLayer.PLAGUE_LINE_FLOOR_PX = 8
 NameLayer.LERP_SPEED = 10.0
 --- A name whose line is shorter than this share of the view width hides (CULL_MIN_PX px at least).
 NameLayer.CULL_VW = 0.004
@@ -72,6 +101,10 @@ type Plate = {
 	flag_id: string,
 	name_stroke: UIStroke,
 	troop_stroke: UIStroke,
+	-- RoPlague: the "N DEAD" line
+	dead: TextLabel,
+	dead_stroke: UIStroke,
+	dead_text: string,
 	-- glide state (map tiles for x / y, the font size for s)
 	sx: number,
 	sy: number,
@@ -486,6 +519,12 @@ function NameLayer._plate(self: any, id: number): Plate
 	name.LayoutOrder = 1
 	local troops, ts = new_text(f, "Troops", 21)
 	troops.LayoutOrder = 2
+	-- RoPlague: how many the plague has killed there, under the infected count
+	local dead, ds = new_text(f, "Dead", 21)
+	dead.LayoutOrder = 3
+	dead.TextColor3 = PLAGUE_KILLED
+	ds.Color = PLAGUE_INK
+	dead.Visible = false
 	f.Parent = self.root
 	p = {
 		frame = f,
@@ -501,6 +540,9 @@ function NameLayer._plate(self: any, id: number): Plate
 		human = false,
 		name_stroke = ns,
 		troop_stroke = ts,
+		dead = dead,
+		dead_stroke = ds,
+		dead_text = "",
 		sx = 0,
 		sy = 0,
 		ss = 0,
@@ -616,14 +658,22 @@ function NameLayer.tick(self: any, dt: number)
 			local shade = shade_of(o.kind)
 			local c = Color3.new(shade, shade, shade)
 			p.name.TextColor3 = c
-			p.troops.TextColor3 = c
+			p.troops.TextColor3 = p.troop_col or c
 			local col = st:owner_color(id)
 			p.name_stroke.Color = col
-			p.troop_stroke.Color = col
+			p.troop_stroke.Color = if st.plague ~= nil then PLAGUE_INK else col
 		end
 		-- a person's head shot and the owner's flag (Data/Cosmetics), left of the name
 		local cz = st.cosmetics and st.cosmetics[id]
 		local face_id = if cz ~= nil and cz.face ~= nil then cz.face else 0
+		-- RoPlague's shared world: a country wears the head shot of the player whose plague holds it
+		local plg = st.plague
+		if plg ~= nil and type(plg.plagues) == "table" and #plg.plagues > 1 then
+			local row = plg.countries[id]
+			local h = if row ~= nil and (row.I or 0) >= 1 then (row.holder or 0) else 0
+			local hz = if h ~= 0 and st.cosmetics ~= nil then st.cosmetics[h] else nil
+			face_id = if hz ~= nil and hz.face ~= nil then hz.face else 0
+		end
 		if face_id ~= p.face_id then
 			p.face_id = face_id
 			p.face.Image = if face_id > 0 then Cosmetics.face_image(face_id) else ""
@@ -654,13 +704,52 @@ function NameLayer.tick(self: any, dt: number)
 			p.px = -1 -- resize the badge with the plate
 		end
 		local troops = o.troops or 0
-		if p.troop_n ~= troops then
+		-- RoPlague: under a country's name, how many of its people are infected (red), UNINFECTED
+		-- (grey) while nobody is, or WIPED OUT once everyone is dead. (The dead ride in `gold`.)
+		local dead = if st.plague ~= nil then (o.gold or 0) else 0
+		if p.troop_n ~= troops or p.dead_n ~= dead then
 			p.troop_n = troops
-			local tt = NumberFormat.render_troops(troops)
-			if p.troop_text ~= tt then
+			p.dead_n = dead
+			local tt, tc
+			-- (the "N DEAD" line: "" hides it)
+			local dt = ""
+			if st.plague ~= nil then
+				local pop = o.max_troops or 0
+				local wiped = dead >= 1 and pop > 0 and dead >= pop * 0.98
+				if wiped and troops < 1 then
+					tt, tc = "WIPED OUT", PLAGUE_DEAD
+				elseif troops >= 1 then
+					tt, tc = plague_people(troops) .. " INFECTED", PLAGUE_RED
+					if dead >= 1 then
+						dt = plague_people(dead) .. " DEAD"
+					end
+				elseif dead >= 1 then
+					-- (the plague burned out here before everyone died)
+					tt, tc = plague_people(dead) .. " DEAD", PLAGUE_KILLED
+				else
+					tt, tc = "UNINFECTED", PLAGUE_CLEAN
+				end
+			else
+				tt = NumberFormat.render_troops(troops)
+			end
+			if p.dead_text ~= dt then
+				p.dead_text = dt
+				p.dead.Text = dt
+				p.dead.Visible = dt ~= "" and p.troops.Visible
+				p.size_dirty = 3
+			end
+			if p.troop_text ~= tt or p.troops.Text ~= tt then
 				p.troop_text = tt
 				p.troops.Text = tt
 				p.size_dirty = 3
+			end
+			if tc ~= nil and p.troop_col ~= tc then
+				p.troop_col = tc
+				p.troops.TextColor3 = tc
+			end
+			-- (the plague's line wears a dark outline: red on the country's colour read badly)
+			if st.plague ~= nil and p.troop_stroke.Color ~= PLAGUE_INK then
+				p.troop_stroke.Color = PLAGUE_INK
 			end
 		end
 		-- size: TextSize caps at 100, a UIScale takes the rest
@@ -671,7 +760,16 @@ function NameLayer.tick(self: any, dt: number)
 			local ts = math.min(px, 100)
 			local sc = px / ts
 			p.name.TextSize = ts
-			p.troops.TextSize = math.max(1, ts * NameLayer.TROOP_SIZE_MULT)
+			-- (RoPlague: the plague line is at least PLAGUE_LINE_FLOOR_PX under a small name, never more
+			-- than 0.62 of the name; under a tiny name it would be a smudge: none)
+			local lt = if st.plague ~= nil
+				then math.max(ts * NameLayer.PLAGUE_LINE_MULT, math.min(NameLayer.PLAGUE_LINE_FLOOR_PX, ts * 0.62))
+				else ts * NameLayer.TROOP_SIZE_MULT
+			p.troops.TextSize = math.max(1, lt)
+			p.troops.Visible = st.plague == nil or lt * sc >= NameLayer.PLAGUE_LINE_MIN_PX
+			-- (the dead line: the infected line's size, a little smaller, and only with it)
+			p.dead.TextSize = math.max(1, lt * 0.9)
+			p.dead.Visible = p.dead_text ~= "" and p.troops.Visible
 			if p.flag.Visible then
 				-- a flag about as tall as the capitals, its own aspect kept (Fit)
 				local fh = math.max(4, math.round(ts * 0.78))
@@ -685,7 +783,11 @@ function NameLayer.tick(self: any, dt: number)
 			p.scaler.Scale = sc
 			local stroke = math.max(1, ts * NameLayer.OUTLINE_K)
 			p.name_stroke.Thickness = stroke
-			p.troop_stroke.Thickness = math.max(1, stroke * NameLayer.TROOP_SIZE_MULT)
+			-- (RoPlague: the plague line has a thick dark outline, so no colour shows through its letters)
+			p.troop_stroke.Thickness = if st.plague ~= nil
+				then math.max(1.5, lt * 0.22)
+				else math.max(1, stroke * NameLayer.TROOP_SIZE_MULT)
+			p.dead_stroke.Thickness = math.max(1.5, lt * 0.2)
 			if p.human then
 				-- readable even on a tiny nation: at least 9 px on screen
 				local bsz = math.max(ts * 0.42, 9 / sc)

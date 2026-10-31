@@ -22,6 +22,13 @@ import threading
 import queue
 
 MCP = "/Applications/RobloxStudio.app/Contents/MacOS/StudioMCP"
+if os.name == "nt":
+    # Windows: the newest Studio version folder that ships StudioMCP.exe
+    import glob
+    _found = sorted(glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "Versions", "*", "StudioMCP.exe")),
+                    key=os.path.getmtime)
+    if _found:
+        MCP = _found[-1]
 
 
 class Client:

@@ -47,7 +47,7 @@ def collect(fs_path, inst_path, out):
     if os.path.isfile(fs_path):
         cls, name = script_kind(os.path.basename(fs_path))
         if cls:
-            out.append((inst_path, cls, open(fs_path).read()))
+            out.append((inst_path, cls, open(fs_path, encoding="utf-8").read()))
         return
     names = sorted(os.listdir(fs_path))
     init = None
@@ -57,7 +57,7 @@ def collect(fs_path, inst_path, out):
             if cls:
                 init = (n, cls)
     if init:
-        out.append((inst_path, init[1], open(os.path.join(fs_path, init[0])).read()))
+        out.append((inst_path, init[1], open(os.path.join(fs_path, init[0]), encoding="utf-8").read()))
     else:
         out.append((inst_path, "Folder", None))
     for n in names:
@@ -69,9 +69,9 @@ def collect(fs_path, inst_path, out):
         else:
             cls, name = script_kind(n)
             if cls:
-                out.append((inst_path + [name], cls, open(p).read()))
+                out.append((inst_path + [name], cls, open(p, encoding="utf-8").read()))
             elif n.endswith(".json") and not n.endswith(".meta.json"):
-                src = "return game:GetService('HttpService'):JSONDecode(" + lua_long(open(p).read()) + ")"
+                src = "return game:GetService('HttpService'):JSONDecode(" + lua_long(open(p, encoding="utf-8").read()) + ")"
                 out.append((inst_path + [n[:-5]], "ModuleScript", src))
 
 

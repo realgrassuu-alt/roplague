@@ -22,6 +22,10 @@
 --   Assets/AudioExtra (the studio's other games) and then Assets/AudioUI (the interface kit, from
 --   the same packs: tools/assets/upload_sfx_ui.py) replace same-named entries; a replaced sound stays as that
 --   name's stand-in, played while the new one has not loaded (still in moderation, or refused).
+--   RoPlague (2026-10-31): Assets/Audio is public Roblox Creator Store sounds, each played over the
+--   region that was picked and at its own `gain`; AudioExtra and AudioUI are empty. Assets/AudioPlague
+--   (our own) is the stand-in of every sound it has a name for, and the only sound of the names the
+--   store set leaves out.
 -- - pop() is the sound of your border growing (added 2026-10-04, so taking land is heard as well as
 --   seen): a run of one bubble pop whose rate follows how fast land is being taken, a little
 --   higher the longer the run lasts.
@@ -108,6 +112,14 @@ AudioDirector.SFX_NAMES = {
 	"star_get",
 	"buy_spend",
 	"unlock",
+	-- RoPlague's own (Assets/AudioPlague): a DNA bubble popped, a hotspot popped, a country infected, a
+	-- traveller sent, a cure bubble, an evolution bought
+	"plague_pop",
+	"plague_hotspot",
+	"plague_infect",
+	"plague_send",
+	"plague_cure",
+	"plague_evolve",
 }
 --- Long stings: a full play at most once per cooldown (ms). A repeat inside the cooldown plays the
 --- fallback accent instead ("" = stay silent), so rapid clicks never restart or stack a 2-3 s sting.
@@ -156,6 +168,12 @@ AudioDirector.THROTTLE_MS = {
 	star_get = 120,
 	buy_spend = 150,
 	unlock = 800,
+	plague_pop = 40,
+	plague_hotspot = 150,
+	plague_infect = 250,
+	plague_send = 120,
+	plague_cure = 120,
+	plague_evolve = 150,
 }
 AudioDirector.DEFAULT_THROTTLE_MS = 50
 --- At most this many copies of one sound may ring at once (the oldest copy is restarted beyond it).
@@ -208,6 +226,8 @@ AudioDirector.MAX_SAME = {
 	star_get = 2,
 	buy_spend = 1,
 	unlock = 1,
+	plague_pop = 4,
+	plague_infect = 2,
 }
 AudioDirector.DEFAULT_MAX_SAME = 3
 --- Voice-steal priority when every voice is busy (default 1).
@@ -873,7 +893,9 @@ function AudioDirector.play_sfx(
 	end
 	local s = (v :: Voice).sound
 	s:Stop()
-	s.Volume = db_to_volume(self.sfx_volume_db + vol_db + (AudioDirector.TRIM_DB[sfx_name] or 0.0))
+	s.Volume = db_to_volume(
+		self.sfx_volume_db + vol_db + (AudioDirector.TRIM_DB[sfx_name] or 0.0) + (tonumber(stream.gain) or 0.0)
+	)
 	local j = math.abs(jitter)
 	s.PlaybackSpeed = if pitch ~= nil
 		then math.clamp(pitch, 0.25, 4.0)
@@ -1199,24 +1221,40 @@ function AudioDirector._load_streams(self: any)
 		if type(e) ~= "table" then
 			return nil
 		end
+		-- (gain: the entry's own level in dB, so a Creator Store sound plays at the level it was picked at)
 		if type(e.id) == "string" then
-			return { id = e.id, length = e.length }
+			return { id = e.id, length = e.length, gain = e.gain }
 		elseif type(e.sprite) == "string" and type(e.start) == "number" and type(e.stop) == "number" then
-			return { id = e.sprite, region = NumberRange.new(e.start, e.stop), length = e.length }
+			return { id = e.sprite, region = NumberRange.new(e.start, e.stop), length = e.length, gain = e.gain }
 		end
 		return nil
 	end
+	-- RoPlague (2026-10-31): Assets/Audio holds public Roblox Creator Store sounds, played by asset id
+	-- (AudioExtra and AudioUI are empty now: none of RoWorld's sounds play). Assets/AudioPlague (our
+	-- sounds, one sprite: tools/assets/make_plague_sfx.py) is each one's stand-in, played while a store
+	-- sound hasn't loaded, and the only sound of the names the store set leaves out (plague_hotspot /
+	-- infect / send / cure / evolve, and the war-mode sounds RoPlague never plays).
+	local ok_p, pl = pcall(function()
+		local m = Shared:FindFirstChild("Assets") and Shared.Assets:FindFirstChild("AudioPlague")
+		return if m then (require :: any)(m) else nil
+	end)
+	local plague_sfx = if ok_p and type(pl) == "table" and type(pl.sfx) == "table" then pl.sfx else {}
 	for _, name in AudioDirector.SFX_NAMES do
 		local older = stream_of(extra_sfx[name] or (manifest.sfx and manifest.sfx[name]))
 		local newer = stream_of(ui_sfx[name])
-		local chosen = newer or older
-		if chosen ~= nil then
-			self._sfx_streams[name] = chosen
-			table.insert(preload, chosen.id)
+		local roworld = newer or older
+		local mine = stream_of(plague_sfx[name])
+		local chosen = roworld or mine
+		if chosen == nil then
+			continue
 		end
-		if newer ~= nil and older ~= nil then
-			self._sfx_streams[name .. "~"] = older
-			table.insert(preload, older.id)
+		self._sfx_streams[name] = chosen
+		table.insert(preload, chosen.id)
+		-- (its stand-in: ours, or else the older RoWorld sound the interface kit replaced)
+		local stand = if roworld == nil then nil elseif mine ~= nil then mine elseif newer ~= nil then older else nil
+		if stand ~= nil then
+			self._sfx_streams[name .. "~"] = stand
+			table.insert(preload, stand.id)
 		end
 	end
 	-- Fetch every sound in the background so the first play of each is instant: the ones a match needs

@@ -718,6 +718,10 @@ function MatchServer._start_match(self: any)
 			if type(info.max) == "number" then
 				config.max_humans = math.max(config.max_humans, info.max)
 			end
+			-- RoPlague: a plague room (server/PlagueMatch): make_sim builds a PlagueSim for it
+			if type(info.plague) == "table" then
+				config.plague = info.plague
+			end
 			-- a team game (Core/Teams; staging only for now): no nations in public team
 			-- games, except Humans Vs Nations, which has as many as the match has player slots
 			if info.mode == "team" and info.teams ~= nil then
@@ -868,7 +872,7 @@ function MatchServer._dress_bots(self: any, ids: any)
 		return if type(v) == "number" and v > 0 then v else nil
 	end
 	local flags, skins = {}, {}
-	for _, it in Cosmetics.all() do
+	for _, it in Cosmetics.world() do
 		if it.kind == "flag" then
 			table.insert(flags, it.id)
 		elseif it.rarity == "common" or it.rarity == "rare" then
@@ -1266,12 +1270,14 @@ function MatchServer.lobby_info(self: any, peer: any): { [string]: any }
 	local max = nil
 	local lobby_map = nil
 	local teams = nil
+	local plague_mode = nil
 	if lobby ~= nil then
 		local ok, info = pcall(lobby.info)
 		if ok and type(info) == "table" then
 			max = info.max
 			lobby_map = info.map_id
 			teams = if info.mode == "team" then info.teams else nil
+			plague_mode = if type(info.plague) == "table" then info.plague.mode else nil
 		end
 	end
 	return {
@@ -1296,6 +1302,8 @@ function MatchServer.lobby_info(self: any, peer: any): { [string]: any }
 		vote_started = self._vote_start_at ~= nil,
 		in_match = me ~= nil,
 		spectating = me ~= nil and me.spectator,
+		-- RoPlague: the multiplayer mode this server plays (Data/PlagueModes; nil: RoWorld's war)
+		plague_mode = plague_mode,
 		map_id = if self._mp_sim ~= nil then self._mp_sim.map_id else (lobby_map or self._map_id),
 	}
 end

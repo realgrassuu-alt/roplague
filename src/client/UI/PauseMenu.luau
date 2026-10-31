@@ -574,8 +574,10 @@ function PauseMenu._ask_leave(self)
 	local mp = ctx:mode() == UICtx.MODE_MULTI
 	if o ~= nil and o.alive and ctx.state ~= nil and ctx.state.phase == Defs.PHASE_PLAYING then
 		self._confirm_text:set_text(
-			"Surrender and return to the title screen? "
-				.. (if mp then "Your nation stays on the map without a commander." else "This campaign will end.")
+			if ctx.state.plague ~= nil
+				then "Give up and return to the title screen? Your plague dies out. You keep the Stars earned so far."
+				else "Surrender and return to the title screen? "
+					.. (if mp then "Your nation stays on the map without a commander." else "This campaign will end.")
 		)
 	else
 		self._confirm_text:set_text("Return to the title screen?")
@@ -634,7 +636,7 @@ function PauseMenu.open(self, labels_on: boolean, page: string?)
 	if on_title then
 		self._leave:set_text("LEAVE QUEUE")
 	else
-		self._leave:set_text(if alive then "SURRENDER" else "LEAVE MATCH")
+		self._leave:set_text(if alive then (if ctx.state.plague ~= nil then "GIVE UP" else "SURRENDER") else "LEAVE MATCH")
 	end
 	self._main:set_visible(true)
 	self._confirm:set_visible(false)

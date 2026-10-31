@@ -190,7 +190,7 @@ function GeneralButton._build(self)
 	}, card)
 	-- the words
 	text(card, {
-		Text = "ROWORLD",
+		Text = "ROPLAGUE",
 		FontFace = FONT_B,
 		TextSize = 11,
 		TextColor3 = GOLD_LIGHT,

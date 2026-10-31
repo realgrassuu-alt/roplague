@@ -1,0 +1,543 @@
+diff --git a/src/client/Main.luau b/src/client/Main.luau
+index f9800ea..ad372d1 100644
+--- a/src/client/Main.luau
++++ b/src/client/Main.luau
+@@ -274,8 +274,10 @@ end
+ local function focus_home()
+ 	local session = Main.session
+ 	local state = session and session.state
+-	if state ~= nil and state.local_owner ~= 0 then
+-		call(Main.world, "focus_owner", state.local_owner)
++	-- RoPlague: the disease owns no land; Home centres on patient zero's country
++	local home = call(Main.ui, "home_owner")
++	if state ~= nil and type(home) == "number" and home > 0 then
++		call(Main.world, "focus_owner", home)
+ 	end
+ end
+ 
+@@ -387,7 +389,7 @@ local function build_hud(player: Player)
+ 	make_button(h, "leaderboard", "leaderboard", "Leaderboard (Tab)", 3, function()
+ 		call(Main.ui, "toggle_leaderboard")
+ 	end)
+-	make_button(h, "home", "globe", "Center on your nation (Home)", 4, focus_home)
++	make_button(h, "home", "globe", "Center on patient zero (Home)", 4, focus_home)
+ 	-- settings (2026-10-07): music, the border pops, labels; on the title too
+ 	make_button(h, "settings", "settings", "Settings", 5, function()
+ 		call(Main.ui, "open_settings")
+@@ -554,7 +556,6 @@ function Main.start()
+ 	end
+ 	on_screen_changed(current_screen())
+ 	Main.boot.ui = os.clock()
+-	Main.launch_hooks(player)
+ 	-- Dev diagnostics (workspace attribute AF_DIAG; never set in the shipped place).
+ 	if workspace:GetAttribute("AF_DIAG") == true then
+ 		local diag = optional(client, { "Dev", "SessionDiag" })
+@@ -564,82 +565,4 @@ function Main.start()
+ 	end
+ end
+ 
+--- Owner-only real-client test hook: joining with launchData "autosolo[:lat,lon]" (e.g.
+--- roblox://experiences/start?placeId=137151641329864&launchData=autosolo:48,10) starts a Standard solo
+--- match and picks the unclaimed land nearest to lat/lon, so the published game can be verified on a
+--- real Roblox client without clicking through the title. Ignored for everyone else.
+-Main.OWNER_USER_ID = 22641473
+-function Main.launch_hooks(player: Player)
+-	task.spawn(function()
+-		local ld = player:GetAttribute("AF_LaunchData")
+-		local t0 = os.clock()
+-		while ld == nil and os.clock() - t0 < 6 do
+-			task.wait(0.25)
+-			ld = player:GetAttribute("AF_LaunchData")
+-		end
+-		if type(ld) ~= "string" or string.sub(ld, 1, 8) ~= "autosolo" then
+-			return
+-		end
+-		if player.UserId ~= Main.OWNER_USER_ID and not game:GetService("RunService"):IsStudio() then
+-			return
+-		end
+-		local lat, lon = 30.0, 100.0
+-		local a, b = string.match(ld, "^autosolo:(%-?[%d%.]+),(%-?[%d%.]+)$")
+-		if a and b then
+-			lat, lon = tonumber(a) or lat, tonumber(b) or lon
+-		end
+-		local session = Main.session
+-		-- wait for the title world, then start solo through the UI's own path
+-		while session.state == nil or session:is_building() do
+-			task.wait(0.2)
+-		end
+-		task.wait(1.0)
+-		if Main.ui ~= nil and type(Main.ui._on_play_solo) == "function" then
+-			pcall(Main.ui._on_play_solo, Main.ui, 1)
+-		else
+-			session:start_solo(1)
+-		end
+-		-- spawn phase of the new solo world: pick the nearest unclaimed contestable land
+-		local deadline = os.clock() + 30
+-		while os.clock() < deadline do
+-			task.wait(0.2)
+-			local st = session.state
+-			if st ~= nil and st.map ~= nil and st.local_owner ~= 0 and not session:is_building() then
+-				local map = st.map
+-				local c = map:latlon_to_tile(lat, lon)
+-				local cx, cy = c % 1024, c // 1024
+-				local best = nil
+-				for r = 0, 60 do
+-					for dy = -r, r do
+-						for dx = -r, r do
+-							if math.max(math.abs(dx), math.abs(dy)) == r then
+-								local y = cy + dy
+-								if y >= 0 and y < 512 then
+-									local t = y * 1024 + (cx + dx) % 1024
+-									if map:is_contestable(t) and st:owner_of(t) == 0 then
+-										best = t
+-										break
+-									end
+-								end
+-							end
+-						end
+-						if best then
+-							break
+-						end
+-					end
+-					if best then
+-						break
+-					end
+-				end
+-				if best ~= nil then
+-					session:send_intent({ type = "spawn", tile = best })
+-					call(Main.world, "focus_tile", best, -1.0, 1.0)
+-					print("[RoWorld] autosolo: spawn requested at tile", best)
+-				end
+-				return
+-			end
+-		end
+-	end)
+-end
+-
+ return Main
+diff --git a/src/client/Session.luau b/src/client/Session.luau
+index 786cd68..5091bee 100644
+--- a/src/client/Session.luau
++++ b/src/client/Session.luau
+@@ -151,7 +151,11 @@ local function roblox_env(): { [string]: any }
+ 	end
+ 	-- Core modules are required lazily: a missing module must never break boot.
+ 	env.require_core = function(name: string): any
+-		local m = Core:FindFirstChild(name)
++		-- "Plague/PlagueSim": a module in a folder under Core
++		local m: Instance? = Core
++		for part in string.gmatch(name, "[^/]+") do
++			m = if m ~= nil then m:FindFirstChild(part) else nil
++		end
+ 		if m == nil then
+ 			return nil
+ 		end
+@@ -388,13 +392,18 @@ end
+ function Session.start_title(self: any)
+ 	self:_leave_multiplayer_if_needed()
+ 	self._wait_map = nil
++	-- RoPlague: the backdrop is a plague spreading by itself (a bot plays the disease)
++	local kinds = { "bacterium", "virus", "fungus", "parasite" }
+ 	self:_start_local(MODE_TITLE, {
+ 		seed = self:_rand_seed(),
+ 		difficulty = 1,
+-		tribes = Session.TITLE_TRIBES,
+ 		max_humans = 0,
+ 		time_limit_s = 0,
+ 		map_id = Session.TITLE_MAP_ID,
++		auto = true,
++		strategy = "balanced",
++		zero_after = 0,
++		pathogen = kinds[math.random(1, #kinds)],
+ 	}, "")
+ end
+ 
+@@ -423,7 +432,9 @@ end
+ function Session.start_solo(self: any, p_difficulty: number, map_id: string?, opts: any?)
+ 	self:_leave_multiplayer_if_needed()
+ 	self.difficulty = math.clamp(math.floor(tonumber(p_difficulty) or 1), 0, 2)
+-	self.map_id = if type(map_id) == "string" and map_id ~= "" then map_id else nil
++	-- (RoPlague: the World map is the one with a country layer, so every solo match plays on it)
++	self.map_id = nil
++	local _ = map_id
+ 	local tribes = if type(opts) == "table" and type(opts.tribes) == "number" then opts.tribes else Session.SOLO_TRIBES
+ 	local countdown = if type(opts) == "table" and type(opts.countdown_ticks) == "number"
+ 		then opts.countdown_ticks
+@@ -436,7 +447,38 @@ function Session.start_solo(self: any, p_difficulty: number, map_id: string?, op
+ 		max_humans = 1,
+ 		time_limit_s = 0,
+ 		map_id = self.map_id,
++		-- RoPlague: the pathogen picked and the name the player gave it
++		pathogen = if type(opts) == "table" then opts.pathogen else nil,
++		name = if type(opts) == "table" then opts.name else nil,
++		tutorial = if type(opts) == "table" then opts.tutorial else nil,
+ 	}, self:local_display_name())
++	self.solo_speed = 1.0
++end
++
++--- RoPlague: applies an intent to the local match at once, even while it is paused (the Evolve
++--- screen), and mirrors the result. Falls back to the normal queue when there is no local match.
++function Session.send_now(self: any, intent: { [string]: any }): boolean
++	local sim = self._sim
++	local state = self.state
++	if self.mode ~= MODE_SOLO or sim == nil or state == nil or type(sim.apply_now) ~= "function" then
++		self:send_intent(intent)
++		return false
++	end
++	self:_settle_step()
++	if self._sim ~= sim then
++		return false
++	end
++	self:_apply(state, sim:apply_now(state.local_owner, intent))
++	return true
++end
++
++--- RoPlague: the solo match's speed (0 pauses; 1, 2 or 4 times). The title backdrop ignores it.
++function Session.set_speed(self: any, speed: number)
++	speed = math.clamp(tonumber(speed) or 1, 0, 8)
++	self.solo_speed = speed
++	if self.mode == MODE_SOLO and self.state_mode == MODE_SOLO then
++		self.local_speed = math.max(speed, 0)
++	end
+ end
+ 
+ --- Starts downloading map `id` unless it is available locally or already on its way. Build / join
+@@ -983,19 +1025,15 @@ Session.WARM_MODULES = {
+ 	"Rng",
+ 	"Rules",
+ 	"WorldMap",
+-	"SimColors",
+ 	"SimNav",
+-	"SimState",
+-	"SimAttacks",
+-	"SimStructures",
+-	"SimNaval",
+-	"SimWarships",
+-	"SimNukes",
+-	"SimAIEconomy",
+-	"SimAI",
++	"Plague/PlagueRules",
++	"Plague/Countries",
++	"Plague/PlagueBot",
+ 	"GameState",
+-	"Sim",
++	"Plague/PlagueSim",
+ }
++--- RoPlague: the simulation every local match runs.
++Session.SIM_MODULE = "Plague/PlagueSim"
+ 
+ --- Builds the Sim, the optional human and the client mirror. Runs inside a Coop job.
+ function Session._build_local(self: any, config: { [string]: any }, human_name: string, serial: number)
+@@ -1005,7 +1043,7 @@ function Session._build_local(self: any, config: { [string]: any }, human_name:
+ 			Coop.check()
+ 		end
+ 	end
+-	local Sim = self:_core("Sim")
++	local Sim = self:_core(Session.SIM_MODULE)
+ 	local GameState = self:_core("GameState")
+ 	local WorldMap = self:_core("WorldMap")
+ 	if Sim == nil or GameState == nil or WorldMap == nil then
+@@ -1019,6 +1057,11 @@ function Session._build_local(self: any, config: { [string]: any }, human_name:
+ 		if SimNav ~= nil and type(SimNav.shared) == "function" then
+ 			SimNav.shared(map)
+ 		end
++		-- the country layer (decoded once per map)
++		local Countries = self:_core("Plague/Countries")
++		if Countries ~= nil then
++			Countries.get(map)
++		end
+ 		self._warm = true
+ 		Coop.check()
+ 	end
+@@ -1102,7 +1145,7 @@ function Session._finish_build(self: any, r: { [string]: any })
+ 		self._warm_target = if self._wait_warmup then Session.WAIT_WARMUP_TICKS else Session.TITLE_WARMUP_TICKS
+ 		self._wait_warmup = false
+ 	else
+-		self.local_speed = 1.0
++		self.local_speed = if self._build_mode == MODE_SOLO then (self.solo_speed or 1.0) else 1.0
+ 		self._warming = false
+ 	end
+ 	-- A title world that finishes building while the player is already queued for multiplayer
+@@ -1121,12 +1164,7 @@ function Session._finish_build(self: any, r: { [string]: any })
+ 	self._tracker = nil
+ 	self._solo_reported = false
+ 	self.last_award = nil
+-	if self._build_mode == MODE_SOLO and r.id ~= 0 then
+-		self:_apply_own_cosmetics(r.id)
+-		self:_apply_own_unlocks()
+-		self._tracker = Stars.Tracker.new(r.sim)
+-		self._tracker:watch(r.id)
+-	end
++	-- (RoPlague: no Stars tracker, cosmetics or Arsenal: the war game's match rewards are gone)
+ 	self:_emit("state_ready", self.state)
+ 	local id = r.id
+ 	if id ~= 0 then
+diff --git a/src/shared/Core/Defs.luau b/src/shared/Core/Defs.luau
+index 8075b85..4f2561a 100644
+--- a/src/shared/Core/Defs.luau
++++ b/src/shared/Core/Defs.luau
+@@ -115,6 +115,9 @@ Defs.NUKE_UNLOCK = { [0] = 0, 0, 0, 0, 1, 2, 8, 16, 32 }
+ 
+ -- Tile flags (GameState.flags / delta "flags")
+ Defs.F_FALLOUT = 1
++--- RoPlague: the tile is infected / its people are dead (F_DEAD is set with F_INF).
++Defs.F_INF = 2
++Defs.F_DEAD = 4
+ 
+ -- Unit removal reasons
+ Defs.DEL_ARRIVED = 0
+@@ -134,6 +137,10 @@ Defs.OVER_DOMINATION = 0
+ Defs.OVER_TIME = 1
+ Defs.OVER_DEFEATED = 2
+ Defs.OVER_ABANDONED = 3
++--- RoPlague: humanity is gone (a win) / the cure is done / the disease died out (losses).
++Defs.OVER_EXTINCT = 4
++Defs.OVER_CURED = 5
++Defs.OVER_BURNOUT = 6
+ 
+ -- Map atlas cells (assets/icons/map_atlas.png, 8 x 2 cells of 128 px) as {x, y} (Vector2i in GDScript).
+ Defs.ATLAS_CITY = { x = 0, y = 0 }
+diff --git a/src/shared/Core/Ev.luau b/src/shared/Core/Ev.luau
+index cb2672e..3b4cccf 100644
+--- a/src/shared/Core/Ev.luau
++++ b/src/shared/Core/Ev.luau
+@@ -45,7 +45,18 @@ Ev.REINFORCE = 33 -- id, troops, ready_tick  (Reinforcements arrived; the next c
+ Ev.BONUS = 34 -- owner, tile, gold  (gold `owner` earned at `tile`, a train's
+ --   stop at a station. Only for a person, and sent to that person alone)
+ 
++-- RoPlague (Core/Plague/PlagueSim) ---------------------------------------------------------------
++Ev.P_INFECTED = 35 -- country, tile  (the first infection of a country)
++Ev.P_CLOSE = 36 -- country, closed bits (PlagueSim.C_AIR / C_PORT / C_BORDER / C_QUARANTINE / C_COLLAPSE)
++Ev.P_BUBBLE = 37 -- id, kind (0 DNA, 1 cure), country, tile, value, expire_tick
++Ev.P_BUBBLE_END = 38 -- id, popped (1 / 0)
++Ev.P_TRAIT = 39 -- trait id, owned (1 / 0), how (0 bought, 1 mutated, 2 devolved)
++Ev.P_FLIGHT = 40 -- uid, from_tile, to_tile, launch_tick, flight_ticks, infected (1 / 0), from_country
++Ev.P_FLIGHT_END = 41 -- uid, seeded (1 / 0)
++Ev.P_DNA = 42 -- amount, tile (-1: none), reason (0 passive, 1 bubble, 2 new country, 3 first death, 4 cure bubble)
++Ev.P_ABILITY = 43 -- key, tile, ready_tick
++
+ --- Number of event ids (ids are 0..COUNT-1).
+-Ev.COUNT = 35
++Ev.COUNT = 44
+ 
+ return Ev
+diff --git a/src/shared/Core/GameState.luau b/src/shared/Core/GameState.luau
+index d6c073f..2422618 100644
+--- a/src/shared/Core/GameState.luau
++++ b/src/shared/Core/GameState.luau
+@@ -71,6 +71,17 @@ local SIGNALS = {
+ 	"message", -- (to, category, text)
+ 	"phase_changed", -- (phase, ticks_left)
+ 	"game_over", -- (winner, reason)
++	-- RoPlague (Core/Plague/PlagueSim) --------------------------------------------------------
++	"plague_changed", -- () state.plague's numbers moved (every delta that carries them)
++	"country_infected", -- (country, tile) its first case
++	"country_closed", -- (country, closed bits, old bits)
++	"bubble_added", -- (id)
++	"bubble_removed", -- (id, popped)
++	"trait_changed", -- (id, owned, how) how: 0 bought, 1 mutated, 2 devolved
++	"flight_added", -- (uid)
++	"flight_ended", -- (uid, seeded)
++	"dna_gained", -- (amount, tile, reason)
++	"ability_used", -- (key, tile, ready_tick)
+ }
+ GameState.SIGNAL_NAMES = SIGNALS
+ 
+@@ -236,9 +247,88 @@ function GameState.new(world: any?)
+ 	--- owner id → { skin = id?, flag = id? } (Data/Cosmetics): outside the Sim — the match server
+ 	--- sends it (OP.COSMETICS), a solo match sets the player's own
+ 	self.cosmetics = {} :: { [number]: { skin: string?, flag: string?, face: number? } }
++	--- RoPlague: the disease and the world's response (nil outside a plague match). See _load_plague.
++	self.plague = nil :: any
++	--- Flights in the air, by uid: {uid, from_tile, to_tile, launch_tick, flight_ticks, infected, from_c}.
++	self.flights = {} :: { [number]: any }
++	--- Bubbles on the map, by id: {id, kind, country, tile, value, expire_tick}.
++	self.bubbles = {} :: { [number]: any }
+ 	return self
+ end
+ 
++--- The plague mirror: {pid, pathogen, name, difficulty, dna, cure, cure_rate, aware, research, H, I, D,
++--- inf, sev, leth (0..1 meters), ability_ready, start_c, owned = {[trait id] = true},
++--- countries = {[c] = {H, I, D, closed, funding (0..100)}}}.
++function GameState._load_plague(self: any, pl: any)
++	table.clear(self.flights)
++	table.clear(self.bubbles)
++	if type(pl) ~= "table" then
++		self.plague = nil
++		return
++	end
++	local p = { owned = {}, countries = {} }
++	self.plague = p
++	for k, v in pl do
++		if k ~= "c" and k ~= "owned" and k ~= "flights" and k ~= "bubbles" then
++			p[k] = v
++		end
++	end
++	for _, id in pl.owned or {} do
++		p.owned[id] = true
++	end
++	self:_plague_rows(pl.c)
++	for _, row in pl.flights or {} do
++		self:_add_flight(row, 0)
++	end
++	for _, row in pl.bubbles or {} do
++		self:_add_bubble(row, 0)
++	end
++end
++
++function GameState._plague_rows(self: any, rows: any)
++	local p = self.plague
++	if p == nil or rows == nil then
++		return
++	end
++	for _, r in rows do
++		local c = p.countries[r[1]]
++		if c == nil then
++			c = {}
++			p.countries[r[1]] = c
++		end
++		c.H, c.I, c.D, c.closed, c.funding = r[2], r[3], r[4], r[5], r[6]
++	end
++end
++
++function GameState._add_flight(self: any, args: { any }, o: number)
++	self.flights[args[o + 1]] = {
++		uid = args[o + 1],
++		from_tile = args[o + 2],
++		to_tile = args[o + 3],
++		launch_tick = args[o + 4],
++		flight_ticks = args[o + 5],
++		infected = args[o + 6] == 1,
++		from_c = args[o + 7],
++	}
++end
++
++function GameState._add_bubble(self: any, args: { any }, o: number)
++	self.bubbles[args[o + 1]] = {
++		id = args[o + 1],
++		kind = args[o + 2],
++		country = args[o + 3],
++		tile = args[o + 4],
++		value = args[o + 5],
++		expire_tick = args[o + 6],
++	}
++end
++
++--- A country's plague row (nil: untouched so far — all healthy, nothing closed).
++function GameState.country_row(self: any, c: number): any
++	local p = self.plague
++	return if p ~= nil then p.countries[c] else nil
++end
++
+ --- Replace the equipped cosmetics of the owners in `map` (owner id → {skin, flag, face}; an owner
+ --- mapped to false loses theirs). `face` is the player's Roblox user id (their head shot beside their
+ --- name). `full`: owners not in `map` lose theirs too. Fires cosmetics_changed.
+@@ -937,6 +1027,7 @@ function GameState.load_snapshot(self: GameState, snap: { [string]: any })
+ 	for _, row in snap.requests or {} do
+ 		self.requests[row[1] * 1024 + row[2]] = row[3] or self.tick
+ 	end
++	self:_load_plague(snap.plague)
+ 	self.loaded = true
+ 	self.snapshot_loaded:Fire()
+ end
+@@ -970,6 +1061,16 @@ function GameState.apply_delta(self: GameState, delta: { [string]: any })
+ 	if stats ~= nil and #stats > 0 then
+ 		self:_apply_stats(stats)
+ 	end
++	local pl = delta.pl
++	local plague = self.plague
++	if pl ~= nil and plague ~= nil then
++		for k, v in pl do
++			if k ~= "c" then
++				plague[k] = v
++			end
++		end
++		self:_plague_rows(pl.c)
++	end
+ 	table.clear(self._removed_now)
+ 	local evs = delta.ev
+ 	if evs ~= nil then
+@@ -998,6 +1099,9 @@ function GameState.apply_delta(self: GameState, delta: { [string]: any })
+ 			end
+ 		end
+ 	end
++	if pl ~= nil and plague ~= nil then
++		self.plague_changed:Fire()
++	end
+ 	self.ticked:Fire(self.tick)
+ end
+ 
+@@ -1353,6 +1457,73 @@ HANDLERS[Ev.GAME_OVER] = function(self, e)
+ 	self.game_over:Fire(self.winner, self.over_reason)
+ end
+ 
++HANDLERS[Ev.P_INFECTED] = function(self, e)
++	local p = self.plague
++	if p ~= nil and p.countries[e[2]] == nil then
++		p.countries[e[2]] = { H = 0, I = 0, D = 0, closed = 0, funding = 0 }
++	end
++	self.country_infected:Fire(e[2], e[3])
++end
++
++HANDLERS[Ev.P_CLOSE] = function(self, e)
++	local p = self.plague
++	local old = 0
++	if p ~= nil then
++		local c = p.countries[e[2]]
++		if c == nil then
++			c = { H = 0, I = 0, D = 0, closed = 0, funding = 0 }
++			p.countries[e[2]] = c
++		end
++		old = c.closed or 0
++		c.closed = e[3]
++	end
++	self.country_closed:Fire(e[2], e[3], old)
++end
++
++HANDLERS[Ev.P_BUBBLE] = function(self, e)
++	self:_add_bubble(e, 1)
++	self.bubble_added:Fire(e[2])
++end
++
++HANDLERS[Ev.P_BUBBLE_END] = function(self, e)
++	if self.bubbles[e[2]] ~= nil then
++		self.bubble_removed:Fire(e[2], e[3] == 1)
++		self.bubbles[e[2]] = nil
++	end
++end
++
++HANDLERS[Ev.P_TRAIT] = function(self, e)
++	local p = self.plague
++	if p ~= nil then
++		p.owned[e[2]] = if e[3] == 1 then true else nil
++	end
++	self.trait_changed:Fire(e[2], e[3] == 1, e[4])
++end
++
++HANDLERS[Ev.P_FLIGHT] = function(self, e)
++	self:_add_flight(e, 1)
++	self.flight_added:Fire(e[2])
++end
++
++HANDLERS[Ev.P_FLIGHT_END] = function(self, e)
++	if self.flights[e[2]] ~= nil then
++		self.flight_ended:Fire(e[2], e[3] == 1)
++		self.flights[e[2]] = nil
++	end
++end
++
++HANDLERS[Ev.P_DNA] = function(self, e)
++	self.dna_gained:Fire(e[2], e[3], e[4])
++end
++
++HANDLERS[Ev.P_ABILITY] = function(self, e)
++	local p = self.plague
++	if p ~= nil then
++		p.ability_ready = e[4]
++	end
++	self.ability_used:Fire(e[2], e[3], e[4])
++end
++
+ GameState.HANDLERS = HANDLERS
+ 
+ function GameState._add_struct(self: GameState, sid: number, kind: number, own: number, tile: number)

@@ -96,7 +96,7 @@ function GeneralOffer._build(self)
 	local left = UITheme.vbox(10)
 	left.size_flags_vertical = W.SHRINK_CENTER
 	body:add_child(left)
-	self._title = UITheme.label("ROWORLD GENERAL", 26, 800, UITheme.GOLD, 2)
+	self._title = UITheme.label("ROPLAGUE GENERAL", 26, 800, UITheme.GOLD, 2)
 	left:add_child(self._title)
 	self._sub = UITheme.label("Every perk below, every month.", 13, 500, UITheme.TEXT_2)
 	self._sub:set_autowrap(true)

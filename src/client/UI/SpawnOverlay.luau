@@ -96,9 +96,9 @@ function SpawnOverlay.new(c: any)
 	panel:add_child(row)
 	local v = UITheme.vbox(1)
 	v.size_flags_vertical = W.SHRINK_CENTER
-	self._title = UITheme.label("CHOOSE YOUR STARTING LOCATION", SpawnOverlay.TITLE_PX, 800, UITheme.TEXT, 1.5)
+	self._title = UITheme.label("CHOOSE PATIENT ZERO", SpawnOverlay.TITLE_PX, 800, UITheme.TEXT, 1.5)
 	v:add_child(self._title)
-	self._sub = UITheme.label("Click any unclaimed land to place your capital.", 12, 500, UITheme.TEXT_2)
+	self._sub = UITheme.label("Click any country to start your plague there.", 12, 500, UITheme.TEXT_2)
 	v:add_child(self._sub)
 	-- phones: the count is a third line under the text
 	self._placed = UITheme.label("", 12, 600, UITheme.TEXT_3)
@@ -214,20 +214,24 @@ function SpawnOverlay.refresh(self)
 		self._title:set_text("COMMANDERS ARE DEPLOYING")
 		self._sub:set_text("You are spectating this match.")
 	elseif late and not placed then
-		self._title:set_text("DROP INTO THE WAR")
-		self._sub:set_text(verb .. " any unclaimed land to deploy your capital.")
+		self._title:set_text("JOIN THE OUTBREAK")
+		self._sub:set_text(verb .. " any country to place patient zero.")
 	elseif placed and solo and left >= 0.0 then
 		self._title:set_text(string.format("DEPLOYING IN %d", math.ceil(left)))
-		self._sub:set_text(verb .. " elsewhere to relocate your capital.")
+		self._sub:set_text(verb .. " elsewhere to move patient zero.")
+	elseif placed and s.plague ~= nil and type(s.shared_world) == "function" and s:shared_world() then
+		-- (RoPlague's shared world: a start is final; it begins once every plague is placed)
+		self._title:set_text("PATIENT ZERO PLACED")
+		self._sub:set_text("Waiting for the other plagues to pick where they start.")
 	elseif placed then
-		self._title:set_text("CAPITAL PLACED")
+		self._title:set_text("PATIENT ZERO PLACED")
 		self._sub:set_text(verb .. " elsewhere to relocate until the countdown ends.")
 	else
-		self._title:set_text("CHOOSE YOUR STARTING LOCATION")
+		self._title:set_text("CHOOSE PATIENT ZERO")
 		self._sub:set_text(
 			if not ctx.touch
-				then "Click any unclaimed land to place your capital."
-				else "Tap any unclaimed land to place your capital."
+				then "Click any country to start your plague there."
+				else "Tap any country to start your plague there."
 		)
 	end
 	self:_refresh_players()

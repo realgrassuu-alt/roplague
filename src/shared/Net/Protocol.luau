@@ -117,6 +117,12 @@ Protocol.OP = {
 	-- server/Purchases.starter_seen; the INVENTORY that follows carries `starter`)
 	GENERAL = 42, -- server → client: ({ on: boolean, given: { crate: boolean?, stars: number?, skin: string? }? })
 	-- RoWorld General (Data/Subscription; server/General): subscribed or not, and what it just gave
+	-- RoPlague's Plague Race (server/PlagueMatch; Data/PlagueModes "race"): each racer plays the world on
+	-- their own client. server → client: ("start", { seed, at, racers = { {uid, name} } }) start a
+	-- local match now; ("standings", { {uid, name, dead, infected, cure, countries, out, place} })
+	-- once a second; ("over", { winner uid, standings }). client → server: ("report", { dead,
+	-- infected, cure, countries }) once a second; ("done", reason: "extinct" | "cured" | "burnout")
+	RACE = 43,
 }
 
 Protocol.INTENT_TYPES = {
@@ -133,6 +139,15 @@ Protocol.INTENT_TYPES = {
 	"donate",
 	"ally_extend", -- {target}: ask to renew the alliance with `target` (last 30 s before it expires)
 	"reinforce", -- {}: the Arsenal's Reinforcements (gold for troops; Sim.reinforce)
+	"evolve", -- {kind}: RoPlague's evolutions (Data/Traits id; SimPlague.evolve)
+	-- RoPlague's multiplayer (2026-10-30, Co-op and 1v1; Core/Plague/PlagueSim reads `kind` / `uid` for
+	-- its own `id` / `key`): appended so the war's indices stay the same
+	"zero", -- {tile}: patient zero
+	"devolve", -- {kind}: give an evolution back
+	"pop", -- {uid}: a bubble
+	"ability", -- {kind}: the pathogen's power
+	"infect", -- {target}: a country
+	"cure", -- {kind, target}: 1v1, the cure's player acts on a country (PlagueSim._cure_act)
 }
 local INTENT_INDEX: { [string]: number } = {}
 for i, name in Protocol.INTENT_TYPES do
@@ -1110,6 +1125,15 @@ function Protocol.encode_intent(intent: { [string]: any }): buffer?
 	local idx = INTENT_INDEX[tostring(intent.type)]
 	if idx == nil then
 		return nil
+	end
+	-- (RoPlague's intents name a trait / an ability by `id` / `key` and a bubble by `id`: on the wire a
+	-- string travels as `kind` and a bubble id as `uid`)
+	if intent.kind == nil and (type(intent.id) == "string" or type(intent.key) == "string") then
+		intent = table.clone(intent)
+		intent.kind = if type(intent.id) == "string" then intent.id else intent.key
+	elseif intent.uid == nil and type(intent.id) == "number" then
+		intent = table.clone(intent)
+		intent.uid = intent.id
 	end
 	local w = w_new(32)
 	w_u8(w, 0)

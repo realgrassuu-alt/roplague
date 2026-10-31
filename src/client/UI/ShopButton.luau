@@ -104,7 +104,7 @@ function ShopButton._build(self)
 		Rotation = 90,
 	}, card)
 	new("UIStroke", { Color = LILAC, Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, card)
-	self._flag = new("ImageLabel", {
+	self._flag = new("ImageLabel", { -- (RoPlague: a colour swatch, Cosmetics.swatch)
 		Name = "Flag",
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(0.5, 0.5),
@@ -117,14 +117,14 @@ function ShopButton._build(self)
 	new("UIStroke", { Color = WHITE, Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, self._flag)
 	self._flag_scale = new("UIScale", {}, self._flag)
 	text(card, {
-		Text = "FLAG SHOP",
+		Text = "COLOUR SHOP",
 		TextSize = 17,
 		Position = UDim2.fromOffset(84, 8),
 		Size = UDim2.fromOffset(144, 20),
 		ZIndex = 5,
 	})
 	self._what = text(card, {
-		Text = "NEW FLAGS DAILY",
+		Text = "NEW COLOURS DAILY",
 		TextSize = 12,
 		TextColor3 = LILAC,
 		Position = UDim2.fromOffset(84, 30),
@@ -226,7 +226,7 @@ function ShopButton.refresh(self)
 		table.insert(keys, k)
 	end
 	self._keys = keys
-	self._what.Text = if #c.sets > 0 then string.upper(c.sets[1].name) .. " FLAGS" else "NEW FLAGS DAILY"
+	self._what.Text = if #c.sets > 0 then string.upper(c.sets[1].name) .. " COLOURS" else "NEW COLOURS DAILY"
 	self._what.TextColor3 = if #c.sets > 0 then PUMPKIN else LILAC
 	self._sticker.Visible = self.ctx:setting("shop_seen_day", -1) ~= c.day
 	self:_show_flag()
@@ -239,10 +239,9 @@ function ShopButton._show_flag(self)
 		self._flag.Image = ""
 		return
 	end
-	local image, x, y, w, h = Cosmetics.flag_big(it)
-	self._flag.Image = image
-	self._flag.ImageRectOffset = Vector2.new(x, y)
-	self._flag.ImageRectSize = Vector2.new(w, h)
+	self._flag.Image = ""
+	self._flag.BackgroundTransparency = 0
+	Cosmetics.swatch(it, self._flag)
 end
 
 function ShopButton._process(self, dt: number)

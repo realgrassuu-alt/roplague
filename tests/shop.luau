@@ -20,7 +20,8 @@ local function expect(c: any, w: string)
 end
 
 local pool = Shop.pool()
-expect(#Shop.flags() >= 24 and #pool >= 20, ("catalog: %d flags, %d in the daily pool"):format(#Shop.flags(), #pool))
+-- (RoPlague: the shop sells infection colours, Data/Strains)
+expect(#Shop.flags() >= 19 and #pool >= 15, ("catalog: %d colours, %d in the daily pool"):format(#Shop.flags(), #pool))
 for _, key in pool do
 	if Shop.flag(key).set ~= nil then
 		expect(false, "the pool holds no set flag: " .. key)
@@ -100,10 +101,10 @@ expect(Shop.next_in(d0 * 86400 + 3600) == 82800, "the clock: 23 h to the next sh
 
 -- the Halloween set
 local hs = Shop.sets(1792627200 + 3 * 86400)
-expect(#hs == 1 and hs[1].id == "halloween" and #hs[1].keys == 6, "Halloween is on sale on 2026-10-25, 6 flags")
+expect(#hs == 1 and hs[1].id == "halloween" and #hs[1].keys == 4, "Halloween is on sale on 2026-10-25, 4 colours")
 expect(#Shop.sets(1793664000) == 0 and #Shop.sets(1792627200 - 1) == 0, "... and not before 10-22 nor from 11-03")
 local t = 1792627200 + 86400 + 50
-expect(Shop.on_sale("pumpkin_king", t), "on sale: a set flag while the set runs")
+expect(Shop.on_sale("bloodmoon", t), "on sale: a set colour while the set runs")
 expect(Shop.on_sale(Shop.daily(Shop.day(t))[1], t), "on sale: today's daily flag")
 local off = nil
 for _, k in pool do
@@ -115,14 +116,12 @@ end
 expect(off ~= nil and not Shop.on_sale(off, t), "not on sale: a pool flag not in today's shop")
 
 -- cosmetics and products
-local it = Cosmetics.item("shop_pumpkin_king")
+local it = Cosmetics.item("shop_bloodmoon")
 expect(
-	it ~= nil and it.kind == "flag" and it.shop and it.rarity == "legendary",
-	"the shop flag is a Legendary flag item"
+	it ~= nil and it.kind == "color" and it.shop and it.rarity == "legendary",
+	"the shop item is a Legendary colour item"
 )
-expect(Cosmetics.flag_image(it) ~= "" and it.w > 0, "... with its sheet and rect")
-local img = Cosmetics.flag_big(it)
-expect(type(img) == "string" and img ~= "", "... and a big one for the shop's cards")
+expect(type(it.a) == "table" and type(it.b) == "table", "... with its two colours")
 local in_crate = false
 for _, c in Cosmetics.all() do
 	if c.shop then
@@ -131,16 +130,16 @@ for _, c in Cosmetics.all() do
 end
 expect(not in_crate, "no shop flag in the crate catalog (nor on a bot player)")
 expect(
-	Cosmetics.crate_owned({ shop_pumpkin_king = true, flag_us = true }) == 1,
+	Cosmetics.crate_owned({ shop_bloodmoon = true, flag_us = true, color_lime = true }) == 1,
 	"the Locker's N of M counts crate items only"
 )
-expect(Shop.key_of("shop_kraken") == "kraken" and Shop.key_of("flag_us") == nil, "key_of: shop ids only")
-local p = Products.shop_pumpkin_king
+expect(Shop.key_of("shop_toxic") == "toxic" and Shop.key_of("flag_us") == nil, "key_of: shop ids only")
+local p = Products.shop_bloodmoon
 expect(
-	p ~= nil and p.grants == "shopflag:pumpkin_king" and p.robux == Shop.PRICES.legendary,
-	"its product: 149 Robux, grants the flag"
+	p ~= nil and p.grants == "shopflag:bloodmoon" and p.robux == Shop.PRICES.legendary and p.id ~= 0,
+	"its product: 149 Robux, grants the colour, created in our universe"
 )
-expect(Products.shop_cat ~= nil and Products.shop_cat.robux == Shop.PRICES.rare, "a Rare flag's product is 49 Robux")
+expect(Products.shop_toxic ~= nil and Products.shop_toxic.robux == Shop.PRICES.rare, "a Rare colour's product is 49 Robux")
 
 -- a purchase
 local rows = {}
@@ -170,12 +169,12 @@ Purchases.configure({
 	end,
 })
 Purchases.load(P)
-Products.shop_kraken.id = 5550001
+Products.shop_toxic.id = 5550001
 local r = Purchases.process_receipt({ PlayerId = 7, ProductId = 5550001, PurchaseId = "k1" })
 local inv = Purchases.inventory(P)
-expect(r == "granted" and table.find(inv.owned, "shop_kraken") ~= nil, "a shop flag's receipt: the flag is theirs")
+expect(r == "granted" and table.find(inv.owned, "shop_toxic") ~= nil, "a colour's receipt: the colour is theirs")
 expect(
-	inv.equipped.flag == "shop_kraken" and bought[1] == "shopflag:kraken",
+	inv.equipped.color == "shop_toxic" and bought[1] == "shopflag:toxic",
 	"... worn at once; the server hears of it"
 )
 local stars = inv.stars
@@ -186,23 +185,23 @@ expect(
 )
 expect(
 	Purchases.process_receipt({ PlayerId = 7, ProductId = 5550001, PurchaseId = "k2" }) == "granted"
-		and Purchases.inventory(P).stars == stars + Products.shop_kraken.robux * Purchases.DUPLICATE_STARS_PER_ROBUX,
+		and Purchases.inventory(P).stars == stars + Products.shop_toxic.robux * Purchases.DUPLICATE_STARS_PER_ROBUX,
 	"a second purchase of an owned flag pays Stars for its price"
 )
-expect(Purchases.equip(P, "flag", "flag_us") == false, "equip: a flag they don't own is refused")
-expect(Purchases.equip(P, "flag", false) and Purchases.equip(P, "flag", "shop_kraken"), "equip: off, then on again")
+expect(Purchases.equip(P, "color", "shop_neon") == false, "equip: a colour they don't own is refused")
+expect(Purchases.equip(P, "color", false) and Purchases.equip(P, "color", "shop_toxic"), "equip: off, then on again")
 
 -- the Halloween bundle (2026-10-24): every flag of the set, the rarest new one worn, owned ones pay
 -- back their share in Stars
-expect(Shop.SETS.halloween.bundle == 299 and Shop.set_total("halloween") == 544, "the pack: 299 Robux for 544 of flags")
+expect(Shop.SETS.halloween.bundle == 199 and Shop.set_total("halloween") == 446, "the pack: 199 Robux for 446 of colours")
 local hk = Shop.set_keys("halloween")
-expect(#hk == 6 and hk[1] == "pumpkin_king", "its flags, rarest first")
+expect(#hk == 4 and hk[1] == "bloodmoon", "its colours, rarest first")
 expect(
 	Products.shopset_halloween ~= nil and Products.shopset_halloween.grants == "shopset:halloween",
 	"its product grants the set"
 )
 local Q = { UserId = 8, Name = "Packer" }
-rows.u8 = { owned = { shop_phantom = true }, equipped = { flag = "flag_us" }, receipts = {} }
+rows.u8 = { owned = { shop_spectre = true }, equipped = { flag = "flag_us" }, receipts = {} }
 Purchases.configure({
 	players = {
 		GetPlayerByUserId = function(_, id)
@@ -224,10 +223,10 @@ for _, k in hk do
 		all = false
 	end
 end
-expect(all, "... all 6 Halloween flags are theirs")
-expect(qi.equipped.flag == "shop_pumpkin_king", "... wearing the Pumpkin King (the rarest new one)")
-local share = math.floor(299 * 49 / 544 * Purchases.DUPLICATE_STARS_PER_ROBUX)
-expect(qi.stars == before + share, ("... Phantom, owned before, paid back its share: %d Stars"):format(share))
+expect(all, "... all 4 Halloween colours are theirs")
+expect(qi.equipped.color == "shop_bloodmoon", "... wearing Blood Moon (the rarest new one)")
+local share = math.floor(199 * 99 / 446 * Purchases.DUPLICATE_STARS_PER_ROBUX)
+expect(qi.stars == before + share, ("... Spectre, owned before, paid back its share: %d Stars"):format(share))
 
 -- the FEATURED card: 2 x 2 cells top-left, the rest around it
 local ShopLayout = require("../src/client/UI/ShopLayout")
@@ -240,9 +239,9 @@ local cells4, r4 = ShopLayout.place(4, true, 4)
 expect(r4 == 2 and cells4[4][1] == 2 and cells4[4][2] == 1, "4 with a hero: 2 rows, the others to its right")
 local _, r0 = ShopLayout.place(4, false, 4)
 expect(r0 == 1, "4 without a hero: one row")
-local ordered, hero = ShopLayout.order({ "cat", "pumpkin_king", "bat_moon" })
-expect(hero and ordered[1] == "pumpkin_king", "a section with a Legendary features it")
-local _, nohero = ShopLayout.order({ "cat", "bat_moon" })
+local ordered, hero = ShopLayout.order({ "toxic", "bloodmoon", "neon" })
+expect(hero and ordered[1] == "bloodmoon", "a section with a Legendary features it")
+local _, nohero = ShopLayout.order({ "toxic", "neon" })
 expect(not nohero, "... and one without has no featured card")
 
 if fails > 0 then

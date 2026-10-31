@@ -22,13 +22,13 @@ Coach.TIPS = {
 	floor = { icon = "troops", again = true, desktop = FLOOR_TIP, touch = FLOOR_TIP },
 	expand = {
 		icon = "attack",
-		desktop = "Click neutral land next to you to expand. Space does the same under the cursor.",
-		touch = "Tap neutral land next to you to expand.",
+		desktop = "Click land next to you to infect it. Space does the same under the cursor.",
+		touch = "Tap land next to you to infect it.",
 	},
 	ratio = {
 		icon = "troops",
-		desktop = "The Attack bar sets how many of your troops each click sends. Q / E change it.",
-		touch = "Tap a % on the Attack bar to choose how many troops each tap sends.",
+		desktop = "The Attack bar sets how many of your infected each click sends. Q / E change it.",
+		touch = "Tap a % on the Attack bar to choose how many infected each tap sends.",
 	},
 	city = {
 		icon = "city",
@@ -48,7 +48,7 @@ Coach.TIPS = {
 	select = {
 		icon = "target",
 		desktop = "Target selected. Click it again, or press the big button, to send the order.",
-		touch = "Target selected: check their troops, then tap it again or press the big button to attack.",
+		touch = "Target selected: check their defenders, then tap it again or press the big button to infect.",
 	},
 	tray = {
 		icon = "city",

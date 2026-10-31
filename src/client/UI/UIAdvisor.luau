@@ -118,7 +118,7 @@ function UIAdvisor.check_threats(self: any)
 		self.ui.feed:toast(
 			Defs.MSG_BAD,
 			string.format(
-				"%s (%s troops) borders you with %d× your army. Fortify or find allies.",
+				"%s (%s defenders) borders you with %d× your strength. Fortify or find allies.",
 				s:owner_name(worst),
 				T().fmt_troops(worst_troops),
 				ratio_x
@@ -895,7 +895,7 @@ function UIAdvisor.war_begins(self: any)
 	top_y = math.max(top_y, band.Min.Y - 12.0)
 	local Banner = UICtx.mod("Banner")
 	local banner =
-		Banner.make(ctx, "THE WAR BEGINS", "Expand, build and outlast 88 nations", T().AMBER, 1.6, top_y, h, small)
+		Banner.make(ctx, "THE OUTBREAK BEGINS", "Infect every country before the cure is ready", T().AMBER, 1.6, top_y, h, small)
 	-- The camera is still pushing in, so where the player's own label ends up is only known as it
 	-- goes: the band slides clear of it (up to just under the top panels, or below the capital), and
 	-- every other map label steps around its text (review R2-5: on a 361 px phone the subtitle sat

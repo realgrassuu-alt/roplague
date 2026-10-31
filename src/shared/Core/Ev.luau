@@ -45,7 +45,25 @@ Ev.REINFORCE = 33 -- id, troops, ready_tick  (Reinforcements arrived; the next c
 Ev.BONUS = 34 -- owner, tile, gold  (gold `owner` earned at `tile`, a train's
 --   stop at a station. Only for a person, and sent to that person alone)
 
+-- RoPlague (Core/SimPlague)
+Ev.EVOLVE = 35 -- owner, trait id  (an evolution bought, or a strain's starting one)
+Ev.CURE = 36 -- progress x 10000, research on (1 / 0), per-second rate x 1e7  (solo, once a second)
+
+-- RoPlague solo (Core/Plague/PlagueSim)
+Ev.P_INFECTED = 37 -- country, tile  (the first infection of a country)
+Ev.P_CLOSE = 38 -- country, closed bits (PlagueRules.C_AIR / C_PORT / C_BORDER / C_QUARANTINE / C_COLLAPSE)
+Ev.P_BUBBLE = 39 -- id, kind (0 DNA, 1 cure), country, tile, value, expire_tick
+Ev.P_BUBBLE_END = 40 -- id, popped (1 / 0)
+Ev.P_TRAIT = 41 -- trait id, owned (1 / 0), how (0 bought, 1 mutated, 2 devolved)
+Ev.P_FLIGHT = 42 -- uid, from_tile, to_tile, launch_tick, flight_ticks, infected (1 / 0), from_country
+Ev.P_FLIGHT_END = 43 -- uid, seeded (1 / 0)
+Ev.P_DNA = 44 -- amount, tile (-1: none), reason (0 passive, 1 bubble, 2 new country, 3 first death, 4 cure bubble)
+Ev.P_ABILITY = 45 -- key, tile, ready_tick
+
+-- RoPlague multiplayer: country, the plague that took it (owner id), the plague it was taken from
+Ev.P_CAPTURE = 46
+
 --- Number of event ids (ids are 0..COUNT-1).
-Ev.COUNT = 35
+Ev.COUNT = 47
 
 return Ev

@@ -1,8 +1,8 @@
 --!nonstrict
 -- The starter pack's offer (Data/Starter; 2026-10-15: the starter pack at 39 Robux, on sale for a
 -- limited time only). A window over the title: LIMITED-TIME OFFER,
--- STARTER PACK, the three items it unlocks (their shop renders on a glow of their colour, name and one
--- line), the regular price struck through beside the offer's with a red "-76%" sticker (both Roblox's
+-- STARTER PACK, the three items it unlocks (each icon on a badge of its colour, name, one line, and
+-- "WORTH (Robux) N" under it), the regular price struck through beside the offer's with a red "-76%" sticker (both Roblox's
 -- live prices: the discount is always the real one), ENDS IN 47:59:12 counting down, "Then it's gone for
 -- good." (the pack goes, not just its price), BUY NOW and NOT NOW.
 --
@@ -29,10 +29,6 @@ end
 local Starter = shared("Data", "Starter")
 local Catalog = shared("Data", "Arsenal")
 local Products = shared("Data", "Products")
-local Art: any = (function()
-	local ok, m = pcall(shared, "Assets", "ArsenalArt")
-	return if ok and type(m) == "table" then m else {}
-end)()
 local TweenService = if IS_ROBLOX then game:GetService("TweenService") else nil
 
 local StarterOffer = W.class(W.Control)
@@ -50,7 +46,6 @@ local RED_DARK = Color3.fromRGB(150, 16, 34)
 local INK = Color3.fromRGB(52, 28, 2)
 local WHITE = Color3.new(1, 1, 1)
 local MUTED = Color3.fromRGB(168, 182, 214)
-local NIGHT = Color3.fromRGB(8, 12, 26)
 local ROBUX = "rbxasset://textures/ui/common/robux@3x.png"
 local FONT_H = Font.fromId(UITheme.FONT_ID, Enum.FontWeight.Heavy)
 local FONT_B = Font.fromId(UITheme.FONT_ID, Enum.FontWeight.Bold)
@@ -220,7 +215,7 @@ function StarterOffer._build(self)
 	new("UIGradient", { Color = ColorSequence.new(WHITE, GOLD_LIGHT), Rotation = 90 }, title)
 	new("UIStroke", { Color = Color3.fromRGB(40, 12, 4), Thickness = 2, Transparency = 0.35 }, title)
 	self._sub = text(win, {
-		Text = "Three Arsenal unlocks, yours for good.",
+		Text = "Three plague perks for every match, yours for good.",
 		FontFace = FONT_M,
 		TextSize = 14,
 		TextColor3 = MUTED,
@@ -463,10 +458,12 @@ function StarterOffer._press_feel(_self, b: GuiButton, sc: UIScale)
 	end)
 end
 
---- One item: its render on a glow of its colour, its name and one line (an owned one says what it pays
---- instead).
+--- One item: a dark card with its icon on a round badge of its colour (the same for all three, so they
+--- read as one set), its name and one line (an owned one says what it pays instead), and under the card
+--- what it costs on its own: WORTH (Robux) N, Roblox's live price.
+StarterOffer.WORTH = Color3.fromRGB(96, 232, 128)
 function StarterOffer._tile(_self, win: Instance, it: any, x: number, y: number): any
-	local W_, H_ = 118, 196
+	local W_, H_ = 118, 180
 	local top, bottom = c3(it.color[1]), c3(it.color[2])
 	local tile = new("Frame", {
 		Name = "Item_" .. it.key,
@@ -476,43 +473,51 @@ function StarterOffer._tile(_self, win: Instance, it: any, x: number, y: number)
 		ZIndex = 62,
 	}, win)
 	new("UICorner", { CornerRadius = UDim.new(0, 12) }, tile)
-	new("UIGradient", { Color = ColorSequence.new(top:Lerp(NIGHT, 0.45), bottom:Lerp(NIGHT, 0.82)), Rotation = 90 }, tile)
-	new("UIStroke", { Color = top:Lerp(WHITE, 0.4), Thickness = 1.5, Transparency = 0.45 }, tile)
+	new("UIGradient", {
+		Color = ColorSequence.new(Color3.fromRGB(30, 38, 70), Color3.fromRGB(12, 16, 34)),
+		Rotation = 90,
+	}, tile)
+	new("UIStroke", { Color = top:Lerp(WHITE, 0.3), Thickness = 1.5, Transparency = 0.35 }, tile)
 	local crate = UITheme.crate_art()
+	local cy = 60
 	new("ImageLabel", {
 		Name = "Glow",
 		BackgroundTransparency = 1,
 		Image = crate.glow or "",
-		ImageColor3 = top:Lerp(WHITE, 0.25),
-		ImageTransparency = 0.25,
+		ImageColor3 = top,
+		ImageTransparency = 0.5,
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromOffset(W_ / 2, 66),
-		Size = UDim2.fromOffset(140, 130),
+		Position = UDim2.fromOffset(W_ / 2, cy),
+		Size = UDim2.fromOffset(130, 120),
 		ZIndex = 62,
 	}, tile)
-	local r = (Art.renders or {})[it.key]
-	local bw, bh = 104, 112
-	local iw, ih = bw, bh
-	if type(r) == "table" and r.w and r.h then
-		local k = math.min(bw / r.w, bh / r.h)
-		iw, ih = r.w * k, r.h * k
-	end
+	local badge = new("Frame", {
+		Name = "Badge",
+		BackgroundColor3 = WHITE,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromOffset(W_ / 2, cy),
+		Size = UDim2.fromOffset(84, 84),
+		ZIndex = 63,
+	}, tile)
+	new("UICorner", { CornerRadius = UDim.new(0.5, 0) }, badge)
+	new("UIGradient", { Color = ColorSequence.new(top:Lerp(WHITE, 0.15), bottom), Rotation = 90 }, badge)
+	new("UIStroke", { Color = WHITE, Thickness = 2, Transparency = 0.55, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, badge)
 	local art = new("ImageLabel", {
 		Name = "Art",
 		BackgroundTransparency = 1,
-		Image = if type(r) == "table" then r.id else "",
+		Image = UITheme.icon(it.icon) or "",
 		ScaleType = Enum.ScaleType.Fit,
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromOffset(W_ / 2, 66),
-		Size = UDim2.fromOffset(iw, ih),
-		ZIndex = 63,
+		Position = UDim2.fromOffset(W_ / 2, cy),
+		Size = UDim2.fromOffset(58, 58),
+		ZIndex = 64,
 	}, tile)
 	text(tile, {
 		Text = it.title,
 		FontFace = FONT_H,
 		TextSize = 15,
 		TextXAlignment = Enum.TextXAlignment.Center,
-		Position = UDim2.fromOffset(4, 128),
+		Position = UDim2.fromOffset(4, 110),
 		Size = UDim2.fromOffset(W_ - 8, 20),
 		ZIndex = 63,
 	})
@@ -524,8 +529,51 @@ function StarterOffer._tile(_self, win: Instance, it: any, x: number, y: number)
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Center,
 		TextYAlignment = Enum.TextYAlignment.Top,
-		Position = UDim2.fromOffset(6, 150),
-		Size = UDim2.fromOffset(W_ - 12, 42),
+		Position = UDim2.fromOffset(6, 132),
+		Size = UDim2.fromOffset(W_ - 12, 44),
+		ZIndex = 63,
+	})
+	-- what it is worth on its own, under the card
+	local worth = new("Frame", {
+		Name = "Worth",
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(x, y + H_ + 4),
+		Size = UDim2.fromOffset(W_, 18),
+		ZIndex = 63,
+	}, win)
+	new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, worth)
+	text(worth, {
+		Text = "WORTH",
+		FontFace = FONT_H,
+		TextSize = 13,
+		TextColor3 = StarterOffer.WORTH,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.fromOffset(0, 18),
+		LayoutOrder = 1,
+		ZIndex = 63,
+	})
+	new("ImageLabel", {
+		BackgroundTransparency = 1,
+		Image = ROBUX,
+		ImageColor3 = StarterOffer.WORTH,
+		Size = UDim2.fromOffset(14, 14),
+		LayoutOrder = 2,
+		ZIndex = 63,
+	}, worth)
+	local worth_n = text(worth, {
+		Text = "0",
+		FontFace = FONT_H,
+		TextSize = 14,
+		TextColor3 = StarterOffer.WORTH,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.fromOffset(0, 18),
+		LayoutOrder = 3,
 		ZIndex = 63,
 	})
 	local owned = new("Frame", {
@@ -534,7 +582,7 @@ function StarterOffer._tile(_self, win: Instance, it: any, x: number, y: number)
 		Position = UDim2.fromOffset(6, 6),
 		Size = UDim2.fromOffset(58, 18),
 		Visible = false,
-		ZIndex = 64,
+		ZIndex = 65,
 	}, tile)
 	new("UICorner", { CornerRadius = UDim.new(0.5, 0) }, owned)
 	text(owned, {
@@ -543,9 +591,9 @@ function StarterOffer._tile(_self, win: Instance, it: any, x: number, y: number)
 		TextSize = 11,
 		TextXAlignment = Enum.TextXAlignment.Center,
 		Size = UDim2.fromScale(1, 1),
-		ZIndex = 65,
+		ZIndex = 66,
 	})
-	return { tile = tile, art = art, line = line, owned = owned, it = it, y = 66 }
+	return { tile = tile, art = art, badge = badge, line = line, owned = owned, worth = worth_n, it = it, y = cy }
 end
 
 function StarterOffer.bind(self, s: any)
@@ -621,6 +669,7 @@ function StarterOffer.refresh(self)
 	local inv = if s ~= nil then s.inventory else nil
 	for key, t in self._tiles do
 		local have = inv ~= nil and inv.unlocks ~= nil and inv.unlocks[key] == true
+		t.worth.Text = tostring(Prices.robux(t.it.product))
 		t.owned.Visible = have
 		t.art.ImageTransparency = if have then 0.35 else 0
 		if have then
@@ -707,7 +756,12 @@ function StarterOffer._on_inventory(self)
 		self.bought_at = os.clock()
 		self.ctx:sfx("unlock")
 		if self.ui_notice ~= nil then
-			self.ui_notice("Starter Pack unlocked! Mega Nuke, Scattershot and 2x Stars are yours.")
+			local names = {}
+			for _, k in Starter.ITEMS do
+				local it = Catalog.item(k)
+				table.insert(names, if it ~= nil then it.title else k)
+			end
+			self.ui_notice("Starter Pack unlocked! " .. table.concat(names, ", ") .. " are yours.")
 		end
 		self:close()
 		return
@@ -740,7 +794,9 @@ function StarterOffer._process(self, dt: number)
 	local i = 0
 	for _, t in self._tiles do
 		i += 1
-		t.art.Position = UDim2.fromOffset(59, t.y + math.sin(self._t * 1.6 + i * 1.1) * 3)
+		local p = UDim2.fromOffset(59, t.y + math.sin(self._t * 1.6 + i * 1.1) * 3)
+		t.art.Position = p
+		t.badge.Position = p
 	end
 	self:_tick_clock()
 	local p = self._pending

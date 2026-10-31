@@ -34,6 +34,7 @@ local SimNaval = require("./SimNaval")
 local SimWarships = require("./SimWarships")
 local SimNukes = require("./SimNukes")
 local SimArsenal = require("./SimArsenal")
+local SimPlague = require("./SimPlague")
 local SimAI = require("./SimAI")
 local Teams = require("./Teams")
 local WorldMap = require("./WorldMap")
@@ -55,6 +56,7 @@ SimNaval.install(Sim)
 SimWarships.install(Sim)
 SimNukes.install(Sim)
 SimArsenal.install(Sim)
+SimPlague.install(Sim)
 
 Sim.TICK_RATE = TICK_RATE
 --- Owners whose start lies within these many tiles (of the original 1024-wide grid; scaled by the
@@ -145,6 +147,7 @@ function Sim.new(p_map: any, config: { [string]: any }?): any
 	self:_init_warships()
 	self:_init_nukes()
 	self:_init_arsenal()
+	self:_init_plague(cfg)
 	Coop.check()
 	if type(cfg.defense_posts_shoot) == "boolean" then
 		self.defense_posts_shoot = cfg.defense_posts_shoot
@@ -418,6 +421,7 @@ function Sim.step(self: any): { [string]: any }
 				self:factories_tick()
 				self:arsenal_tick()
 				self:nukes_tick()
+				self:plague_tick()
 				self:_diplomacy_tick()
 				self:_process_eliminations()
 				if tick % 10 == 0 then
@@ -468,6 +472,7 @@ function Sim._step_profiled(self: any)
 	t = self:_lap(7, t)
 	self:arsenal_tick()
 	self:nukes_tick()
+	self:plague_tick()
 	t = self:_lap(8, t)
 	self:_diplomacy_tick()
 	self:_process_eliminations()
@@ -535,6 +540,11 @@ function Sim.snapshot(self: any): { [string]: any }
 		flags = fl,
 		owners = owners,
 		structs = self:struct_rows(),
+		-- RoPlague (SimPlague)
+		evo = self:evo_rows(),
+		cure = self.cure,
+		cure_on = self.cure_on,
+		cure_rate = self.cure_rate,
 		roads = self:road_rows(),
 		units = self:unit_rows(),
 		nukes = self:nuke_rows(),
@@ -996,6 +1006,8 @@ function Sim._apply_intent(self: any, id: number, it: { [string]: any })
 		self:donate(id, _int(it, "target", 0), _int(it, "troops", 0))
 	elseif kind == "reinforce" then
 		self:reinforce(id)
+	elseif kind == "evolve" then
+		self:evolve(id, _str(it, "kind"))
 	end
 end
 
@@ -1520,13 +1532,20 @@ function Sim._economy_tick(self: any)
 			tkind, tdiff = Defs.KIND_NATION, NOVICE
 		end
 		-- maxTroops: + cityTroopIncrease per level of each finished city.
-		local cap = max_troops(tkind, o_tiles[id], o_alevel[id * STRUCT_KINDS + Defs.S_CITY], tdiff)
+		-- (RoPlague: evolutions scale the capacity, growth and income; sickness slows the growth)
+		local fx = self:fx_of(id)
+		local cap = max_troops(tkind, o_tiles[id], o_alevel[id * STRUCT_KINDS + Defs.S_CITY], tdiff) * fx.cap
 		o_cap[id] = cap
 		-- Per-tick player update: + troopIncreaseRate troops (whole troops: truncated) and
 		-- + goldAdditionRate gold every tick, never during the spawn phase.
-		o_troops[id] += troop_growth_applied(tkind, o_troops[id], cap, tdiff)
+		local grow = fx.grow * self:sick_mult(id)
+		if grow == 1.0 then
+			o_troops[id] += troop_growth_applied(tkind, o_troops[id], cap, tdiff)
+		else
+			o_troops[id] += Defs.trunc(Rules.troop_growth(tkind, o_troops[id], cap, tdiff) * grow)
+		end
 		if (tick + id) % 10 == 0 then
-			o_income[id] = Rules.passive_income(kind, o_tiles[id])
+			o_income[id] = Rules.passive_income(kind, o_tiles[id]) * fx.gold
 		end
 		o_gold[id] += o_income[id] / TICK_RATE
 		if second then

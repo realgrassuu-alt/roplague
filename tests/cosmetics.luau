@@ -16,11 +16,11 @@ local function expect(c: any, w: string)
 	end
 end
 
--- catalog
+-- RoWorld's skins and flags (Cosmetics.world: still items, no longer in a crate)
 local ids, skins, flags = {}, 0, 0
 local dup = false
 local rare_ok = true
-for _, it in Cosmetics.all() do
+for _, it in Cosmetics.world() do
 	if ids[it.id] then
 		dup = true
 	end
@@ -53,6 +53,16 @@ expect(not dup, "item ids are unique")
 expect(rare_ok, "masks rectangular, every skin coloured, every flag has an image rect, rarities known")
 expect(skins >= 20 and flags == #Flags.flags and flags > 250, string.format("%d skins, %d flags", skins, flags))
 expect(Cosmetics.item("flag_ne") == nil, "no Niger flag")
+-- RoPlague: the crate catalog is the crates' infection colours (Data/Strains crate)
+local colours, crate_ok = 0, true
+for _, it in Cosmetics.all() do
+	colours += 1
+	if ids[it.id] or it.kind ~= "color" or not it.crate_color or string.sub(it.id, 1, 6) ~= "color_" then
+		crate_ok = false
+	end
+	ids[it.id] = true
+end
+expect(crate_ok and colours == 20, colours .. " crate colours, ids color_<key>, none a skin or a flag")
 local sum = 0
 for _, r in Cosmetics.RARITIES do
 	sum += r.odds
@@ -162,7 +172,7 @@ do
 	expect(Cosmetics.may_own("tie_dye", ILYANNNA) and not Cosmetics.may_own("tie_dye", 1), "may_own: its owner only")
 	expect(Cosmetics.may_own("stripes", 1) and Cosmetics.may_own("stripes", nil), "may_own: crate items for anyone")
 	expect(not Cosmetics.may_own("nope", ILYANNNA), "may_own: unknown ids for nobody")
-	expect(Cosmetics.crate_owned({ tie_dye = true, stripes = true }) == 1, "crate_owned leaves exclusives out")
+	expect(Cosmetics.crate_owned({ tie_dye = true, stripes = true, color_lime = true }) == 1, "crate_owned leaves exclusives (and RoWorld skins) out")
 	-- a player owning every crate item still has nothing to roll (the exclusive is not in crates)
 	local all = {}
 	for _, it in Cosmetics.all() do

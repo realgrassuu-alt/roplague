@@ -107,7 +107,11 @@ end
 
 do
 	local ok, st = pcall(require, "../src/shared/Assets/Soundtrack")
-	if ok and type(st) == "table" then
+	-- (RoPlague, 2026-10-29: the original developer's uploads were taken out; until the music is uploaded
+	-- by us again the manifest has no tracks, and AudioDirector plays none)
+	if ok and type(st) == "table" and next(st.tracks or {}) == nil then
+		print("  skip the soundtrack manifest (no tracks uploaded yet)")
+	elseif ok and type(st) == "table" then
 		local good = true
 		for _, m in { "title", "wait", "calm", "war", "victory", "defeat" } do
 			local list = st.moods[m]

@@ -208,65 +208,70 @@ end
 
 HelpOverlay.SECTIONS = {
 	{
-		icon = "target",
-		color = "amber",
-		title = "Pick your start",
-		text = "Click any unclaimed land to place your capital. Solo games deploy 5 seconds after you choose; until then you can move it.",
+		icon = "virus",
+		color = "red",
+		title = "Patient zero",
+		text = "Click any country to plant your plague there. You never own land: your plague lives inside the real world's people, and every country fights back in its own way.",
 	},
 	{
-		icon = "attack",
+		icon = "infect",
 		color = "orange",
-		title = "Expand & attack",
-		text = "Click neutral land beside you to expand, or a nation you border to attack it. The Attack bar sets the share of troops you send (Q / E, or Shift + wheel). Troops regrow on their own, fastest well below your cap.",
+		title = "Click to infect",
+		text = "Only a country that shares a border with an infected one can be infected by land. Click it and an infected traveller walks across the border (1 DNA). Hover a country first to see what a click does and what it costs.",
 	},
 	{
 		icon = "boat",
 		color = "cyan",
-		title = "Boats",
-		text = "Click a coast you can't reach by land and a transport sails from your nearest shore, landing troops for a beachhead. Warships (built from a Port) patrol where you send them: they hit transports first, then warships, then trade ships, which they capture for gold. Below {ws_retreat}% health a warship returns to port and heals near your ports; kills earn it veterancy. Click one of yours, then the sea, to move it.{post_shoot}",
+		title = "Infected ships",
+		text = "A country across the sea: click it and an infected ship sails from your nearest infected coast (2 DNA). Ships only reach nearby coasts; evolve Water Supply to sail further. Closed ports and borders cost more.",
 	},
 	{
-		icon = "alliance",
-		color = "violet",
-		title = "Alliances & betrayal",
-		text = "Right-click a nation to propose an alliance. Allies can't attack each other and can donate troops. Breaking an alliance brands you a Traitor for {traitor_s} s: everyone knows, and attacks against you cost only {traitor_def}% of the troops and land faster.",
-	},
-	{
-		icon = "city",
+		icon = "dna",
 		color = "gold",
-		title = "Build your economy",
-		builds = true,
+		title = "DNA",
+		text = "Orange bubbles float up over infected places: click them for DNA, and the spot catches more of your plague. Every new country you reach gives DNA too. Blue bubbles slow the cure. Red hotspots pop up over countries next to your plague: click one and that country is infected at once. Spend DNA on evolving.",
+	},
+	{
+		icon = "evolve",
+		color = "amber",
+		title = "Evolve",
 		wide = true,
-		text = "Gold flows from your land, factories and trade. Structures get pricier the more you own and need room ({spacing} tiles apart); place them on your own land with the command bar (1 – 7) or the action menu. Land near a Defense Post costs attackers {def_mag}× the troops and {def_cost}× the time.",
+		text = "Press EVOLVE (the number on it is how many evolutions you can afford right now). Transmission spreads your plague faster and further; Symptoms make it nastier, and the deadly ones win the game but scare the world into hurrying the cure; Abilities let it survive cold, heat, medicine and the cure.",
 	},
 	{
-		icon = "atom",
-		color = "red",
-		title = "Nukes & SAMs",
-		text = "A Missile Silo lets you launch Atom bombs, Hydrogen bombs and MIRVs. Blasts erase troops and structures and leave fallout: land that stays poisoned until someone re-conquers it, slowly and at a high cost. SAM Launchers shoot down bombs aimed inside their range ({sam_r} tiles); MIRV warheads can't be stopped.",
+		icon = "cure",
+		color = "cyan",
+		title = "The cure",
+		text = "Once the world notices your plague, scientists start on a cure (the bar at the top). If it is finished before everyone is gone, you lose. Spread quietly first, then turn deadly.",
 	},
 	{
-		icon = "crown",
+		icon = "death",
+		color = "violet",
+		title = "Win",
+		text = "Wipe out humanity to win. If every host dies or recovers before your plague reaches the rest of the world, it burns out and you lose.",
+	},
+	{
+		icon = "pencil",
 		color = "gold",
-		title = "Win at 80%",
-		text = "Hold {win}% of the world's land to win (fallout doesn't count). Multiplayer matches end after 40 minutes and the largest nation wins. Lose all your land and you're out.",
+		title = "Name your plague",
+		text = "Press the pencil next to your plague's name to give it your own name (the Rename pass). Multiplayer is RoWorld's war mode, with nations and troops.",
 	},
 }
 --- The "Credits & licence" card, last: the AGPL's Appropriate Legal Notices (a copyright notice, no
 --- warranty, that the game may be shared under the licence, where the licence is) and the credits
 --- (2026-10-25: the AGPL licence and its notices and the copyright notice; the flags, map icons, sprites
 --- and effects are RoWorld's own or public domain since that day, and the World map since 2026-10-26).
---- NOTICE.md and LICENSE in the source have the full text.
+--- README.md and LICENSE in the source have the full text.
 HelpOverlay.LEGAL = {
-	"RoWorld is a modified version of OpenFront. © OpenFront and Contributors. Changes © 2026 Snick Co.",
-	"RoWorld is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License, version 3, with the additional terms in its LICENSE file. It comes with ABSOLUTELY NO WARRANTY. The licence comes with RoWorld's source code.",
-	"Maps made with Natural Earth and NOAA ETOPO1 data (public domain). Country flags from Wikimedia Commons (public domain). Music by Rodrigo Flores.",
-	"RoWorld is not affiliated with or endorsed by OpenFront.",
+	"RoPlague is a modified version of RoWorld (© 2026 Snick Co.), itself a modified version of OpenFront (© OpenFront and Contributors). RoPlague's changes © 2026 the RoPlague developers.",
+	"RoPlague is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License, version 3, with the additional terms in its LICENSE file. It comes with ABSOLUTELY NO WARRANTY. The licence comes with RoPlague's source code.",
+	"Maps made with Natural Earth and NOAA ETOPO1 data (public domain). Country flags from Wikimedia Commons (public domain). Music by Rodrigo Flores (Orchestral Ambients), licensed under CC BY 4.0.",
+	"RoPlague is not affiliated with or endorsed by OpenFront, RoWorld or Ndemic Creations.",
 }
 --- Where the source lives, under the credits: plain text with the GitHub mark, since Roblox games
---- can't link off-platform (2026-10-25: "Source <github logo> <repo>" at the bottom; the public repo is
---- lukechatton/roworld, lukechatton/rofront is private).
-HelpOverlay.SOURCE_REPO = "lukechatton/roworld"
+--- can't link off-platform (2026-10-25: "Source <github logo> <repo>" at the bottom). RoPlague's own
+--- public repo since 2026-10-31 (RoWorld's is lukechatton/roworld).
+HelpOverlay.SOURCE_REPO = "realgrassuu-alt/roplague"
 --- The card that pops up over the repo name when it's pressed (2026-10-25), and how long it stays.
 HelpOverlay.SOURCE_TIP = {
 	title = "Source code",
@@ -277,31 +282,21 @@ HelpOverlay.SOURCE_TIP_S = 4.0
 -- Roblox: Esc opens Roblox's own menu (games never receive it), so cancel is X or right-click;
 -- Backspace (retreat) and WASD / +- are Roblox-port keys the original's list didn't show (review P2-4).
 HelpOverlay.KEYS_DESKTOP = {
-	{ "Click", "Expand, attack or send a boat" },
-	{ "Right-click", "Action menu" },
-	{ "Drag", "Rotate the globe" },
-	{ "WASD / Arrows", "Pan the globe" },
-	{ "Wheel / + −", "Zoom" },
-	{ "1 – 0", "Build & nukes" },
-	{ "Q / E", "Attack share −/+" },
-	{ "Space", "Attack at cursor" },
-	{ "Backspace", "Retreat your latest attack" },
-	{ "X / Right-click", "Cancel" },
-	{ "H", "This help" },
-	{ "Tab", "Leaderboard" },
+	-- (RoPlague: the plague's controls; RoWorld's war keys, build, attack share, retreat..., do nothing in
+	-- a plague match)
+	{ "Click", "Infect a country or send a ship" },
+	{ "Click a bubble", "Pop it: DNA, slow the cure, or a hotspot" },
+	{ "Hover", "A country's people and what a click does" },
+	{ "Drag", "Move the map" },
+	{ "Wheel", "Zoom" },
 	{ "M", "Music" },
-	{ "Home", "Center on your nation" },
-	{ "Click a warship", "Then click the sea to move it" },
 }
 HelpOverlay.KEYS_TOUCH = {
-	{ "Tap", "Expand, attack or send a boat" },
-	{ "Long-press", "Action menu" },
-	{ "Drag", "Rotate the globe" },
+	{ "Tap", "Infect a country or send a ship" },
+	{ "Tap a bubble", "Pop it: DNA, slow the cure, or a hotspot" },
+	{ "Tap a country", "Its people and what it costs" },
+	{ "Drag", "Move the map" },
 	{ "Pinch", "Zoom" },
-	{ "Tap a slot", "Tap the globe, then ✓" },
-	{ "Tap your land", "Inspect" },
-	{ "Tap a warship", "Then tap the sea to move it" },
-	{ "Tap an ally", "Donate or break the alliance" },
 }
 
 local COLORS = {
@@ -388,7 +383,7 @@ function HelpOverlay._build(self)
 	local paused = ctx:mode() == UICtx.MODE_SOLO and ctx:in_match()
 	tv:add_child(
 		UITheme.label(
-			"Conquer the real world in seven ideas." .. (if paused then "  ·  Game paused" else ""),
+			"Infect the real world in nine ideas." .. (if paused then "  ·  Game paused" else ""),
 			13,
 			500,
 			UITheme.TEXT_2
@@ -580,7 +575,7 @@ function HelpOverlay._legal(self)
 	return card
 end
 
---- "Source  [<GitHub mark> lukechatton/roworld]", centred below the credits card. Games can't open web
+--- "Source  [<GitHub mark> realgrassuu-alt/roplague]", centred below the credits card. Games can't open web
 --- links, so pressing the repo name pops up where to find it instead (SOURCE_TIP).
 function HelpOverlay._source(self)
 	local row = UITheme.hbox(4)

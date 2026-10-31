@@ -462,6 +462,10 @@ function Telemetry.tick(self)
 			if sm == MODE_SOLO then
 				local d = math.clamp(tonumber(ctx.session and ctx.session.difficulty) or 1, 0, 2)
 				mode = "solo" .. tostring(math.floor(d))
+				-- (the in-game trailer's match, Session.start_trailer: not a real one)
+				if ctx.session ~= nil and ctx.session._trailer == true then
+					mode = "trailer"
+				end
 			end
 			m = {
 				state = st,

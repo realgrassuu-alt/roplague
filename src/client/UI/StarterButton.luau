@@ -17,10 +17,6 @@ local function shared(folder: string, name: string): any
 	end
 	return (require :: any)("../../shared/" .. folder .. "/" .. name)
 end
-local Art: any = (function()
-	local ok, m = pcall(shared, "Assets", "ArsenalArt")
-	return if ok and type(m) == "table" then m else {}
-end)()
 local TweenService = if IS_ROBLOX then game:GetService("TweenService") else nil
 
 local StarterButton = W.class(W.Control)
@@ -121,16 +117,14 @@ function StarterButton._build(self)
 		Size = UDim2.fromOffset(96, 90),
 		ZIndex = 3,
 	}, card)
-	local r = (Art.renders or {}).mega
-	local iw, ih = 56, 70
-	if type(r) == "table" and r.w and r.h then
-		local k = math.min(64 / r.w, 70 / r.h)
-		iw, ih = r.w * k, r.h * k
-	end
+	-- (RoPlague: the pack's first perk, Super Spreader, in white; RoWorld's Mega Nuke render is a
+	-- war item the pack no longer holds)
+	local iw, ih = 58, 58
 	self._art = new("ImageLabel", {
 		Name = "Art",
 		BackgroundTransparency = 1,
-		Image = if type(r) == "table" then r.id else "",
+		Image = UITheme.icon("carrier") or "",
+		ImageColor3 = WHITE,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromOffset(40, 42),
 		Size = UDim2.fromOffset(iw, ih),

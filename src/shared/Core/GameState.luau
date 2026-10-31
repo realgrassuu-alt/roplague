@@ -71,6 +71,20 @@ local SIGNALS = {
 	"message", -- (to, category, text)
 	"phase_changed", -- (phase, ticks_left)
 	"game_over", -- (winner, reason)
+	"evolved", -- (owner, trait id) RoPlague: an evolution (Data/Traits)
+	"cure_changed", -- () RoPlague: state.cure / cure_on / cure_rate moved (solo)
+	-- RoPlague solo (Core/Plague/PlagueSim) -------------------------------------------------
+	"plague_changed", -- () state.plague's numbers moved (every delta that carries them)
+	"country_infected", -- (country, tile) its first case
+	"country_closed", -- (country, closed bits, old bits)
+	"bubble_added", -- (id)
+	"bubble_removed", -- (id, popped)
+	"trait_changed", -- (id, owned, how) how: 0 bought, 1 mutated, 2 devolved
+	"flight_added", -- (uid)
+	"flight_ended", -- (uid, seeded)
+	"dna_gained", -- (amount, tile, reason)
+	"ability_used", -- (key, tile, ready_tick)
+	"country_captured", -- (country, new holder owner id, old holder owner id) a shared world's attack won
 }
 GameState.SIGNAL_NAMES = SIGNALS
 
@@ -236,7 +250,174 @@ function GameState.new(world: any?)
 	--- owner id → { skin = id?, flag = id? } (Data/Cosmetics): outside the Sim — the match server
 	--- sends it (OP.COSMETICS), a solo match sets the player's own
 	self.cosmetics = {} :: { [number]: { skin: string?, flag: string?, face: number? } }
+	--- RoPlague: owner id -> {[trait id] = true} (SimPlague), and the solo cure race.
+	self.evo = {} :: { [number]: { [string]: boolean } }
+	self.cure = 0.0
+	self.cure_on = false
+	--- the cure's progress per second (0..1 scale)
+	self.cure_rate = 0.0
+	--- RoPlague solo: the disease and the world's response (nil outside a plague match). See _load_plague.
+	self.plague = nil :: any
+	self.flights = {} :: { [number]: any }
+	self.bubbles = {} :: { [number]: any }
 	return self
+end
+
+--- The plague mirror: {pid, pathogen, name, difficulty, dna, cure, cure_rate, aware, research, H, I, D,
+--- inf, sev, leth (0..1 meters), ability_ready, start_c, owned = {[trait id] = true},
+--- countries = {[c] = {H, I, D, closed, funding (0..100), holder (a shared world: its plague's owner id)}},
+--- plagues (a shared world: every plague's row, PlagueSim._pl_rows), mine (the local player's row)}.
+--- In a shared world the top-level numbers are the LOCAL player's plague's (GameState._local_plague).
+function GameState._load_plague(self: any, pl: any)
+	table.clear(self.flights)
+	table.clear(self.bubbles)
+	if type(pl) ~= "table" then
+		self.plague = nil
+		return
+	end
+	local p = { owned = {}, countries = {} }
+	self.plague = p
+	for k, v in pl do
+		if k ~= "c" and k ~= "owned" and k ~= "flights" and k ~= "bubbles" then
+			p[k] = v
+		end
+	end
+	for _, id in pl.owned or {} do
+		p.owned[id] = true
+	end
+	for _, row in pl.flights or {} do
+		self:_add_flight(row, 0)
+	end
+	for _, row in pl.bubbles or {} do
+		self:_add_bubble(row, 0)
+	end
+	self:_plague_rows(pl.c)
+	self:_local_plague()
+end
+
+--- What a shared world's plague row puts on the mirror's top level for the local player.
+local LOCAL_FIELDS = {
+	"pid", "name", "pathogen", "dna", "inf", "sev", "leth", "ability_ready", "start_c", "price_mult", "sea_bonus",
+}
+
+--- A shared world (pl.plagues): the local player's plague's numbers onto the top level, so every HUD
+--- piece reads its own plague as in solo. Owners outside every plague (a spectator) see plague 1's.
+function GameState._local_plague(self: any)
+	local p = self.plague
+	if p == nil or type(p.plagues) ~= "table" or #p.plagues == 0 then
+		return
+	end
+	local me = self.local_owner or 0
+	local mine = p.plagues[1]
+	for _, r in p.plagues do
+		if r.pid == me then
+			mine = r
+		end
+	end
+	p.mine = mine
+	for _, k in LOCAL_FIELDS do
+		if mine[k] ~= nil then
+			p[k] = mine[k]
+		end
+	end
+	if type(mine.owned) == "table" then
+		local owned = {}
+		for _, id in mine.owned do
+			owned[id] = true
+		end
+		p.owned = owned
+	end
+end
+
+--- The plague (its row in plague.plagues) owner `pid` plays in a shared world, or nil.
+function GameState.plague_row(self: any, pid: number): any?
+	local p = self.plague
+	if p == nil or type(p.plagues) ~= "table" then
+		return nil
+	end
+	for _, r in p.plagues do
+		if r.pid == pid then
+			return r
+		end
+	end
+	return nil
+end
+
+--- True when this is a shared world (a Plague Race, a team game: several plagues).
+function GameState.shared_world(self: any): boolean
+	local p = self.plague
+	return p ~= nil and type(p.plagues) == "table" and #p.plagues > 1
+end
+
+--- True when event owner id `pid` is the local player's plague (or the event names none: solo).
+function GameState._is_mine(self: any, pid: any): boolean
+	if pid == nil or not self:shared_world() then
+		return true
+	end
+	return pid == (self.local_owner or 0)
+end
+
+--- A traveller carrying the plague across a border (CarrierLayer):
+--- {uid, from_tile, to_tile, launch_tick, flight_ticks, infected, from_c, owner (a shared world: its
+--- plague's owner id)}.
+function GameState._add_flight(self: any, args: { any }, o: number)
+	self.flights[args[o + 1]] = {
+		uid = args[o + 1],
+		from_tile = args[o + 2],
+		to_tile = args[o + 3],
+		launch_tick = args[o + 4],
+		flight_ticks = args[o + 5],
+		infected = args[o + 6] == 1,
+		from_c = args[o + 7],
+		owner = args[o + 8],
+	}
+end
+
+--- A bubble over the map (BubbleLayer): {id, kind (0 DNA, 1 cure), country, tile, value, expire_tick}.
+--- A shared world's DNA bubbles and hotspots belong to one plague: only the local player's are kept.
+function GameState._add_bubble(self: any, args: { any }, o: number): boolean
+	local owner = args[o + 7]
+	if type(owner) == "number" and owner ~= 0 and owner ~= (self.local_owner or 0) then
+		return false
+	end
+	self.bubbles[args[o + 1]] = {
+		id = args[o + 1],
+		kind = args[o + 2],
+		country = args[o + 3],
+		tile = args[o + 4],
+		value = args[o + 5],
+		expire_tick = args[o + 6],
+		owner = owner,
+	}
+	return true
+end
+
+function GameState._plague_rows(self: any, rows: any)
+	local p = self.plague
+	if p == nil or rows == nil then
+		return
+	end
+	for _, r in rows do
+		local c = p.countries[r[1]]
+		if c == nil then
+			c = {}
+			p.countries[r[1]] = c
+		end
+		c.H, c.I, c.D, c.closed, c.funding = r[2], r[3], r[4], r[5], r[6]
+		c.holder = r[7] or 0
+	end
+end
+
+--- A country's plague row (nil: untouched so far — all healthy, nothing closed).
+function GameState.country_row(self: any, c: number): any
+	local p = self.plague
+	return if p ~= nil then p.countries[c] else nil
+end
+
+--- RoPlague: true when owner `id` has evolved `trait`.
+function GameState.has_evo(self: any, id: number, trait: string): boolean
+	local e = self.evo[id]
+	return e ~= nil and e[trait] == true
 end
 
 --- Replace the equipped cosmetics of the owners in `map` (owner id → {skin, flag, face}; an owner
@@ -254,14 +435,16 @@ function GameState.set_cosmetics(self: any, map: { [any]: any }, full: boolean?)
 		local skin = if type(v) == "table" and type(v.skin) == "string" then v.skin else nil
 		local flag = if type(v) == "table" and type(v.flag) == "string" then v.flag else nil
 		local face = if type(v) == "table" and type(v.face) == "number" and v.face > 0 then v.face else nil
+		-- (RoPlague: the infection colour the plague wears, Data/Strains via the shop's "color" items)
+		local color = if type(v) == "table" and type(v.color) == "string" then v.color else nil
 		local old = self.cosmetics[id]
-		if skin == nil and flag == nil and face == nil then
+		if skin == nil and flag == nil and face == nil and color == nil then
 			if old ~= nil then
 				self.cosmetics[id] = nil
 				table.insert(changed, id)
 			end
-		elseif old == nil or old.skin ~= skin or old.flag ~= flag or old.face ~= face then
-			self.cosmetics[id] = { skin = skin, flag = flag, face = face }
+		elseif old == nil or old.skin ~= skin or old.flag ~= flag or old.face ~= face or old.color ~= color then
+			self.cosmetics[id] = { skin = skin, flag = flag, face = face, color = color }
 			table.insert(changed, id)
 		end
 	end
@@ -937,6 +1120,18 @@ function GameState.load_snapshot(self: GameState, snap: { [string]: any })
 	for _, row in snap.requests or {} do
 		self.requests[row[1] * 1024 + row[2]] = row[3] or self.tick
 	end
+	table.clear(self.evo)
+	for _, row in snap.evo or {} do
+		local set = {}
+		for _, t in row[2] or {} do
+			set[t] = true
+		end
+		self.evo[row[1]] = set
+	end
+	self.cure = tonumber(snap.cure) or 0.0
+	self.cure_on = snap.cure_on == true
+	self.cure_rate = tonumber(snap.cure_rate) or 0.0
+	self:_load_plague(snap.plague)
 	self.loaded = true
 	self.snapshot_loaded:Fire()
 end
@@ -970,6 +1165,17 @@ function GameState.apply_delta(self: GameState, delta: { [string]: any })
 	if stats ~= nil and #stats > 0 then
 		self:_apply_stats(stats)
 	end
+	local pl = delta.pl
+	local plague = self.plague
+	if pl ~= nil and plague ~= nil then
+		for k, v in pl do
+			if k ~= "c" then
+				plague[k] = v
+			end
+		end
+		self:_plague_rows(pl.c)
+		self:_local_plague()
+	end
 	table.clear(self._removed_now)
 	local evs = delta.ev
 	if evs ~= nil then
@@ -997,6 +1203,9 @@ function GameState.apply_delta(self: GameState, delta: { [string]: any })
 				self.shell_impact:Fire(id, hit)
 			end
 		end
+	end
+	if pl ~= nil and plague ~= nil then
+		self.plague_changed:Fire()
 	end
 	self.ticked:Fire(self.tick)
 end
@@ -1353,6 +1562,111 @@ HANDLERS[Ev.GAME_OVER] = function(self, e)
 	self.game_over:Fire(self.winner, self.over_reason)
 end
 
+HANDLERS[Ev.EVOLVE] = function(self, e)
+	local set = self.evo[e[2]]
+	if set == nil then
+		set = {}
+		self.evo[e[2]] = set
+	end
+	set[e[3]] = true
+	self.evolved:Fire(e[2], e[3])
+end
+
+HANDLERS[Ev.CURE] = function(self, e)
+	self.cure = (tonumber(e[2]) or 0) / 10000
+	self.cure_on = e[3] == 1
+	self.cure_rate = (tonumber(e[4]) or 0) / 1e7
+	self.cure_changed:Fire()
+end
+
+HANDLERS[Ev.P_INFECTED] = function(self, e)
+	local p = self.plague
+	if p ~= nil and p.countries[e[2]] == nil then
+		p.countries[e[2]] = { H = 0, I = 0, D = 0, closed = 0, funding = 0, holder = e[4] or 0 }
+	end
+	-- (a shared world: the 3rd argument says whose plague got there; nil in solo)
+	self.country_infected:Fire(e[2], e[3], if self:shared_world() then e[4] else nil)
+end
+
+HANDLERS[Ev.P_CAPTURE] = function(self, e)
+	local p = self.plague
+	if p ~= nil then
+		local c = p.countries[e[2]]
+		if c == nil then
+			c = { H = 0, I = 0, D = 0, closed = 0, funding = 0 }
+			p.countries[e[2]] = c
+		end
+		c.holder = e[3]
+	end
+	self.country_captured:Fire(e[2], e[3], e[4])
+end
+
+HANDLERS[Ev.P_CLOSE] = function(self, e)
+	local p = self.plague
+	local old = 0
+	if p ~= nil then
+		local c = p.countries[e[2]]
+		if c == nil then
+			c = { H = 0, I = 0, D = 0, closed = 0, funding = 0 }
+			p.countries[e[2]] = c
+		end
+		old = c.closed or 0
+		c.closed = e[3]
+	end
+	self.country_closed:Fire(e[2], e[3], old)
+end
+
+HANDLERS[Ev.P_TRAIT] = function(self, e)
+	if not self:_is_mine(e[5]) then
+		return
+	end
+	local p = self.plague
+	if p ~= nil then
+		p.owned[e[2]] = if e[3] == 1 then true else nil
+	end
+	self.trait_changed:Fire(e[2], e[3] == 1, e[4])
+end
+
+HANDLERS[Ev.P_DNA] = function(self, e)
+	if not self:_is_mine(e[5]) then
+		return
+	end
+	self.dna_gained:Fire(e[2], e[3], e[4])
+end
+
+HANDLERS[Ev.P_BUBBLE] = function(self, e)
+	if self:_add_bubble(e, 1) then
+		self.bubble_added:Fire(e[2])
+	end
+end
+
+HANDLERS[Ev.P_BUBBLE_END] = function(self, e)
+	if self.bubbles[e[2]] ~= nil then
+		self.bubble_removed:Fire(e[2], e[3] == 1)
+		self.bubbles[e[2]] = nil
+	end
+end
+
+HANDLERS[Ev.P_FLIGHT] = function(self, e)
+	self:_add_flight(e, 1)
+	self.flight_added:Fire(e[2])
+end
+
+HANDLERS[Ev.P_FLIGHT_END] = function(self, e)
+	if self.flights[e[2]] ~= nil then
+		self.flight_ended:Fire(e[2], e[3] == 1)
+		self.flights[e[2]] = nil
+	end
+end
+
+HANDLERS[Ev.P_ABILITY] = function(self, e)
+	local p = self.plague
+	if p ~= nil then
+		p.ability_ready = e[4]
+	end
+	self.ability_used:Fire(e[2], e[3], e[4])
+end
+
 GameState.HANDLERS = HANDLERS
 
 function GameState._add_struct(self: GameState, sid: number, kind: number, own: number, tile: number)
@@ -1443,6 +1757,8 @@ function GameState._set_attack(self: GameState, args: { any }, o: number)
 	at.troops = args[o + 4]
 	at.anchor_tile = args[o + 5]
 	at.retreating = args[o + 6] == true
+	-- (RoPlague's shared world: the country fought over; attacker and target are plagues)
+	at.country = args[o + 7]
 end
 
 function GameState._recount_tiles(self: GameState)

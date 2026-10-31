@@ -43,6 +43,8 @@ local Sprites = require(Airfront:WaitForChild("Assets"):WaitForChild("MapSprites
 local WakeRoute = require(script.Parent:WaitForChild("WakeRoute")) :: any
 local TrailBudget = require(script.Parent:WaitForChild("TrailBudget")) :: any
 local FrameClock = require(script.Parent:WaitForChild("FrameClock")) :: any
+--- RoPlague: the plague's ships wear the infection colour it wears (Data/Strains), like its travellers
+local Strains = require(Airfront:WaitForChild("Data"):WaitForChild("Strains")) :: any
 
 --- The one-image sprites (Sprites.units_one) are used once the atlas is known to have loaded: an image
 --- still in moderation would leave every unit invisible.
@@ -298,7 +300,10 @@ function UnitLayer._sprite(
 	end
 	if s.owner ~= owner then
 		s.owner = owner
-		local c = self._state:owner_color(owner)
+		local st = self._state
+		local c = if st.plague ~= nil and owner == st.plague.pid
+			then Strains.tint(Strains.worn(st), FrameClock.now())
+			else st:owner_color(owner)
 		s.fill.ImageColor3 = c
 		if s.rim ~= nil then
 			s.rim.ImageColor3 = border_of(c)

@@ -61,6 +61,7 @@ UICtx.SFX = {
 	open = "ui_open",
 	close = "ui_back",
 	deny = "ui_error",
+	error = "ui_error",
 	toast = "ui_tab",
 	-- the interface kit (Assets/AudioUI): a press that commits, a tab / toggle, a locked unit,
 	-- Stars counting up and landing, paying, an unlock
@@ -100,6 +101,8 @@ UICtx.SFX = {
 	veterancy = "veterancy",
 	sam_launch = "sam_launch",
 }
+--- Logical ids that make no sound at all. Closing a menu is silent (2026-10-31, the owner's call).
+UICtx.SFX_SILENT = { close = true }
 --- Used when the AudioDirector does not (yet) ship a sound.
 UICtx.SFX_FALLBACK = {
 	close = "ui_click",
@@ -131,6 +134,8 @@ UICtx.SFX_GAP = {
 	star_tick = 28,
 	unlock = 900,
 	toast = 400,
+	-- RoPlague: a country catching it (late game several a second; one sting per 2 s reads as spreading)
+	plague_infect = 2000,
 	attack = 180,
 	expand = 180,
 	boat = 200,
@@ -754,6 +759,11 @@ function UICtx.needs_spawn(self: any): boolean
 		return false
 	end
 	local ph = self.state.phase
+	-- (RoPlague: a 1v1's cure side never places anything: it plays from the first second)
+	local pl = self.state.plague
+	if pl ~= nil and (pl.cure_pid or 0) ~= 0 and self.state.local_owner == pl.cure_pid then
+		return false
+	end
 	return (not o.spawned) and (ph == Defs.PHASE_SPAWN or ph == Defs.PHASE_PLAYING)
 end
 
@@ -1083,6 +1093,9 @@ function UICtx.sfx(self: any, id: string, volume_db: number?, pitch_jitter: numb
 		return
 	end
 	self._sfx_last[id] = now
+	if UICtx.SFX_SILENT[id] then
+		return -- (after the bump above, so the button's own press sound stays quiet too)
+	end
 	local sfx_name = UICtx.SFX[id] or id
 	local fb = UICtx.SFX_FALLBACK[id]
 	if fb and type(a.has_sfx) == "function" and not a:has_sfx(sfx_name) then

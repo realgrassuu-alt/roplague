@@ -3,7 +3,7 @@
 -- banner: the flag's cloth in white and greys, drawn under `flag` tinted the conqueror's colour.
 -- fire, smoke, big_smoke, smoke_fire: the debris a nuke leaves, looping (the last frame runs into the first).
 return {
-	id = "rbxassetid://125969402823728",
+	id = "rbxassetid://112832498438155", -- (RoPlague: our upload of make_map_fx.py's atlas, 2026-10-29)
 	nuke = { x = 0, y = 0, w = 60, h = 60, frames = 12 },
 	flag = { x = 0, y = 60, w = 24, h = 24, frames = 10 },
 	banner = { x = 0, y = 84, w = 24, h = 24, frames = 10 },

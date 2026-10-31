@@ -1249,11 +1249,11 @@ function UIInteract.hover_spec(self: any, tile: number, pinned: boolean?): { [st
 		spec.badge_color = ctx:relation_color(rel)
 		spec.sub = string.format("%s  ·  %s", ctx:kind_title(o.kind), terrain)
 		local rows = {
-			{ "Troops", Th.fmt_troops(o.troops), Th.TEXT },
+			{ if o.kind == Defs.KIND_HUMAN then "Infected" else "Defenders", Th.fmt_troops(o.troops), Th.TEXT },
 			{ "Land", Th.fmt_pct(s:land_share(own)), Th.TEXT },
 		}
 		if own == ctx:me() or pinned then
-			table.insert(rows, { "Gold", Th.fmt_num(o.gold), Th.GOLD })
+			table.insert(rows, { "DNA", Th.fmt_num(o.gold), Th.GOLD })
 		end
 		local st = ctx:structure_at(tile, 1)
 		if st ~= nil and st.owner == own then

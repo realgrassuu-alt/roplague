@@ -36,8 +36,13 @@ local function shared(name: string): any
 end
 local Catalog = shared("Arsenal")
 local Products = shared("Products")
+--- RoPlague: an item sold as a gamepass (Data/Arsenal `pass`)
+local Gamepasses = shared("Gamepasses")
 local Prices = require("./Prices")
 local ArsenalDemo = require("./ArsenalDemo")
+-- RoPlague: the plague perks play their own scenes (UI/Plague/PerkDemos)
+local PerkDemos = require("./Plague/PerkDemos")
+PerkDemos.install(ArsenalDemo)
 local FrameClock = require("../Map/FrameClock")
 local TweenService = if IS_ROBLOX then game:GetService("TweenService") else nil
 
@@ -55,13 +60,13 @@ local Arsenal = W.class(W.Control)
 
 --- The list's groups, in order: a heading and the kinds in it.
 Arsenal.GROUPS = {
-	{ "NUKES", { nuke = true } },
-	{ "ARMY", { call = true, structure = true } },
+	{ "HEAD START", { start = true } },
+	{ "SPREADING", { spread = true } },
 	{ "BOOSTS", { boost = true } },
 }
-Arsenal.KIND_TAGS = { structure = "BUILDING", nuke = "NUKE", call = "ORDER", boost = "BOOST" }
+Arsenal.KIND_TAGS = { start = "START", spread = "SPREAD", boost = "BOOST" }
 --- Under the title.
-Arsenal.SUBTITLE = "Unlock once, keep it forever. Earn Stars by playing matches."
+Arsenal.SUBTITLE = "Plague perks for every match. Unlock once, keep forever. Earn Stars by playing."
 --- Logical px: the list's width, a row's height, the item's width and its preview's height (desktop);
 --- phones put the preview beside the words.
 Arsenal.LIST_W = 236
@@ -216,7 +221,7 @@ function Arsenal.new(c: any)
 	local tv = UITheme.vbox(0)
 	tv.size_flags_horizontal = W.EXPAND_FILL
 	tv.size_flags_vertical = W.SHRINK_CENTER
-	local title = UITheme.label("ARSENAL", 20, 800, UITheme.TEXT, 3)
+	local title = UITheme.label("PLAGUE SHOP", 20, 800, UITheme.TEXT, 3)
 	tv:add_child(title)
 	self._sub = UITheme.label(Arsenal.SUBTITLE, 12, 500, UITheme.TEXT_2)
 	tv:add_child(self._sub)
@@ -281,6 +286,10 @@ function Arsenal.new(c: any)
 		game:GetService("MarketplaceService").PromptProductPurchaseFinished:Connect(function(_u, product_id, purchased)
 			self:_on_prompt_done(product_id, purchased)
 		end)
+		-- (RoPlague: the gamepass items, Data/Arsenal `pass`)
+		game:GetService("MarketplaceService").PromptGamePassPurchaseFinished:Connect(function(_p, pass_id, purchased)
+			self:_on_prompt_done(pass_id, purchased)
+		end)
 	end
 	return self
 end
@@ -318,6 +327,10 @@ end
 
 --- The Robux price of `it` (Roblox's own once it answered), or nil while its product doesn't exist.
 function Arsenal._robux(_self, it: any): number?
+	if it.pass ~= nil then
+		local gp = Gamepasses[it.pass]
+		return if gp ~= nil and (gp.id or 0) > 0 then gp.robux else nil
+	end
 	local p = Products[it.product]
 	if p == nil or p.id == 0 then
 		return nil
@@ -487,11 +500,20 @@ function Arsenal._refresh_list(self)
 			r.text.TextColor3 = GOLD
 		else
 			local price = self:_robux(it)
-			r.icon.Visible = price ~= nil
-			r.icon.Image = ROBUX
-			r.icon.ImageColor3 = WHITE
-			r.text.Text = if price ~= nil then Arsenal.commas(price) else "SOON"
-			r.text.TextColor3 = WHITE
+			if price == nil and it.stars ~= nil then
+				-- (RoPlague: no Robux product yet: what it takes in Stars)
+				r.icon.Visible = true
+				r.icon.Image = UITheme.icon("star") or ""
+				r.icon.ImageColor3 = MUTED
+				r.text.Text = Arsenal.short(it.stars)
+				r.text.TextColor3 = MUTED
+			else
+				r.icon.Visible = price ~= nil
+				r.icon.Image = ROBUX
+				r.icon.ImageColor3 = WHITE
+				r.text.Text = if price ~= nil then Arsenal.commas(price) else "SOON"
+				r.text.TextColor3 = WHITE
+			end
 		end
 	end
 end
@@ -559,8 +581,8 @@ function Arsenal._build_detail(self)
 	end
 	local shot = if type(Art.renders) == "table" then Art.renders[it.key] else nil
 	local image = if shot ~= nil then shot.id else (UITheme.icon(it.icon) or "")
-	local sh = (if demo ~= nil then 0.36 else 0.8) * ph
-	local sw = if shot ~= nil then sh * shot.w / shot.h else sh * 0.6
+	local sh = (if demo ~= nil then 0.36 else (if shot ~= nil then 0.8 else 0.6)) * ph
+	local sw = if shot ~= nil then sh * shot.w / shot.h else sh
 	local max_w = pw * (if demo ~= nil then 0.28 else 0.8)
 	if sw > max_w then
 		sh *= max_w / sw
@@ -570,8 +592,10 @@ function Arsenal._build_detail(self)
 		Name = "Render",
 		BackgroundTransparency = 1,
 		Image = image,
+		-- (a plague perk's scene has its caption along the top: a second icon in the corner only confused it)
+		Visible = demo == nil or PerkDemos.CAPTIONS[it.key] == nil,
 		AnchorPoint = if demo ~= nil then Vector2.new(0, 0) else Vector2.new(0.5, 0.5),
-		Position = if demo ~= nil then UDim2.fromOffset(8 * u, 6 * u) else UDim2.fromScale(0.5, 0.5),
+		Position = if demo ~= nil then UDim2.fromOffset(8 * u, 6 * u) else UDim2.fromOffset(pw * 0.5, ph * 0.5),
 		Size = UDim2.fromOffset(sw, sh),
 		ZIndex = 45,
 	}, root)
@@ -938,19 +962,23 @@ function Arsenal._build_cta(self)
 		self:_line(
 			d.cta,
 			y,
-			if it.kind == "boost" then "It's always on, in every match." else "It's in your build bar in every match.",
+			"It's on in every solo match, for good.",
 			MUTED
 		)
 		return
 	end
-	-- BUY NOW with Robux
+	-- BUY NOW with Robux (RoPlague: not while its product doesn't exist yet; the Stars lead then)
 	local price = self:_robux(it)
-	local buy = buy_button(d.cta, y, bh, u, price, busy and pending.how == "robux", if compact then 15 else 18)
-	buy.button.Activated:Connect(function()
-		self:_robux_pressed(it)
-	end)
-	d.buy = buy
-	y += bh + buy.lip / u + 8
+	if price ~= nil or it.stars == nil then
+		local buy = buy_button(d.cta, y, bh, u, price, busy and pending.how == "robux", if compact then 15 else 18)
+		buy.button.Activated:Connect(function()
+			self:_robux_pressed(it)
+		end)
+		d.buy = buy
+		y += bh + buy.lip / u + 8
+	else
+		sh = bh
+	end
 	-- the other way: Stars
 	if it.stars == nil then
 		self:_line(d.cta, y, "Robux only.", MUTED)
@@ -966,7 +994,7 @@ function Arsenal._build_cta(self)
 			pic(alt.row, UITheme.icon("star") or "", 15, col, u, 2)
 			words(alt.row, Arsenal.commas(it.stars), if compact then 12 else 14, col, u, 3, sh)
 		else
-			words(alt.row, "OR UNLOCK WITH", if compact then 12 else 14, col, u, 1, sh)
+			words(alt.row, if price == nil then "UNLOCK WITH" else "OR UNLOCK WITH", if compact then 12 else 14, col, u, 1, sh)
 			pic(alt.row, UITheme.icon("star") or "", 15, col, u, 2)
 			words(alt.row, Arsenal.commas(it.stars), if compact then 12 else 14, col, u, 3, sh)
 		end
@@ -992,7 +1020,7 @@ function Arsenal._build_cta(self)
 		local fs = if compact then 11 else 12
 		new("TextLabel", {
 			BackgroundTransparency = 1,
-			Text = "Or earn it by playing:",
+			Text = if price == nil then "Earn it by playing matches:" else "Or earn it by playing:",
 			FontFace = FONT_M,
 			TextSize = math.floor(fs * u),
 			TextColor3 = MUTED,
@@ -1141,6 +1169,10 @@ end
 
 function Arsenal._robux_pressed(self, it: any)
 	local inv = self:_inv()
+	if it.pass ~= nil then
+		self:_pass_pressed(it)
+		return
+	end
 	local p = Products[it.product]
 	if self._pending ~= nil or inv.unlocks[it.key] then
 		return
@@ -1157,6 +1189,33 @@ function Arsenal._robux_pressed(self, it: any)
 	self:_refresh()
 	local ok = pcall(function()
 		game:GetService("MarketplaceService"):PromptProductPurchase(game:GetService("Players").LocalPlayer, p.id)
+	end)
+	if not ok then
+		self._pending = nil
+		self:_say("Purchases aren't available right now.", UITheme.RED)
+		self:_refresh()
+	end
+end
+
+--- RoPlague: a gamepass item (Data/Arsenal `pass`): Roblox's gamepass prompt; the server grants the
+--- unlock once the pass is bought (and on every join for an owner).
+function Arsenal._pass_pressed(self, it: any)
+	local gp = Gamepasses[it.pass]
+	if self._pending ~= nil or self:_inv().unlocks[it.key] then
+		return
+	end
+	if gp == nil or (gp.id or 0) <= 0 or not IS_ROBLOX then
+		self.ctx:sfx("deny", -4.0)
+		self:_say(it.title .. " isn't on sale yet.", MUTED)
+		return
+	end
+	self._confirm = nil
+	self:_report("arsenal_click", it.key, "robux")
+	self.ctx:sfx("confirm")
+	self._pending = { key = it.key, how = "robux", product = gp.id, phase = "prompt", since = os.clock() }
+	self:_refresh()
+	local ok = pcall(function()
+		game:GetService("MarketplaceService"):PromptGamePassPurchase(game:GetService("Players").LocalPlayer, gp.id)
 	end)
 	if not ok then
 		self._pending = nil

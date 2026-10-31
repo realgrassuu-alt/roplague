@@ -47,6 +47,8 @@ local TargetCard = require("./TargetCard")
 local UnitCard = require("./UnitCard")
 local PlaceConfirm = require("./PlaceConfirm")
 local Coach = require("./Coach")
+-- RoPlague: the plague match's HUD and windows plug in here (UI/Plague/PlagueLink)
+local PlagueLink = require("./Plague/PlagueLink")
 local Signal = UITheme.core("Signal")
 local Defs = UICtx.core("Defs")
 
@@ -283,13 +285,27 @@ function UIRoot.setup(self, session: any, world: any, audio: any)
 	end
 	if world ~= nil then
 		local inter = self.interact
+		-- RoPlague: in a plague match the map's hover and clicks belong to the plague (PlagueLink)
 		self:_sig(world, "tile_hovered", function(t)
+			if PlagueLink.on_hover(self, t) then
+				return
+			end
 			inter:on_hover(t)
 		end)
 		self:_sig(world, "tile_clicked", function(t)
+			if PlagueLink.on_click(self, t) then
+				return
+			end
 			inter:on_click(t)
 		end)
+		-- RoPlague: a DNA / cure bubble on the map was pressed
+		self:_sig(world, "bubble_clicked", function(id)
+			PlagueLink.on_bubble(self, id)
+		end)
 		self:_sig(world, "tile_context", function(t, pos)
+			if PlagueLink.on_click(self, t) then
+				return
+			end
 			inter:on_context(t, if typeof(pos) == "Vector2" then ctx:to_logical(pos) else ctx:mouse_pos())
 		end)
 		ctx:world_call("set_labels_visible", { self.labels_on })
@@ -314,8 +330,14 @@ function UIRoot.setup(self, session: any, world: any, audio: any)
 			end)
 		end
 	end
+	PlagueLink.setup(self)
 	self._theme = ""
 	self:_request_apply()
+end
+
+--- RoPlague: the country patient zero started in (Main's "centre on" button).
+function UIRoot.home_owner(self): number
+	return PlagueLink.home_owner(self)
 end
 
 --- A new player (Data/Tutorial.is_new, or "Replay as new player") on the title: their first match
@@ -365,6 +387,10 @@ function UIRoot.start_tutorial(self)
 		return
 	end
 	self._solo_msec = UICtx.msec()
+	-- RoPlague: a new player's first match is a plague with its own short guide (PlagueLink)
+	if PlagueLink.start_first(self, TutorialData.DIFFICULTY, UIMaps.DEFAULT_ID) then
+		return
+	end
 	ctx:set_setting("tutorial", "started")
 	self.coach.muted = true
 	self.coach:clear()
@@ -731,7 +757,14 @@ function UIRoot._make_gui(self, parent: Instance?)
 			task.wait()
 		end
 	end
-	local root = W.Root.new(sg, { touch_device = self.ctx.touch_device })
+	-- (Studio: workspace attribute AF_UI_SCALE forces the UI scale, to see a phone's proportions on a
+	-- desktop viewport: a phone's 844x390 is about 0.43)
+	local forced = nil
+	if UICtx.IS_ROBLOX and game:GetService("RunService"):IsStudio() then
+		local v = workspace:GetAttribute("AF_UI_SCALE")
+		forced = if type(v) == "number" and v > 0 then v else nil
+	end
+	local root = W.Root.new(sg, { touch_device = self.ctx.touch_device, scale = forced })
 	root.name = "UI"
 	self.root = root
 	self.ctx.root = root
@@ -961,6 +994,12 @@ function UIRoot._build(self)
 	title.name = "Title"
 	self.title = title
 	title.play_solo:Connect(function(d)
+		-- (RoPlague: searching for a multiplayer match and starting solo: the search ends, or the match
+		-- found would pull the player out of their solo game)
+		local sess = ctx.session
+		if sess ~= nil and sess.public ~= nil and sess.public.state == "line" then
+			ctx:session_call("leave_line")
+		end
 		self:_on_play_solo(d)
 	end)
 	title.play_multi:Connect(function()
@@ -973,9 +1012,9 @@ function UIRoot._build(self)
 		ctx:sfx("click")
 		ctx:session_call("join_lobby", { id })
 	end)
-	title.join_public:Connect(function(mode: string)
+	title.join_public:Connect(function(mode: string, role: string?)
 		ctx:sfx("click")
-		ctx:session_call("join_public", { mode })
+		ctx:session_call("join_public", { mode, role })
 	end)
 	title.leave_line:Connect(function()
 		ctx:sfx("click")
@@ -1032,6 +1071,12 @@ function UIRoot._build(self)
 	end)
 	over.to_title:Connect(function()
 		over:close()
+		-- RoPlague: a Plague Race (each racer's own local match): back to the lobby place
+		local sess = ctx.session
+		if sess ~= nil and sess.race ~= nil then
+			ctx:session_call("leave_race")
+			return
+		end
 		ctx:session_call("leave_match")
 	end)
 	-- solo: take over the nation that eliminated you (Takeover.luau)
@@ -1174,6 +1219,7 @@ function UIRoot._build(self)
 	ctx.floor_held:Connect(function()
 		self.advisor:on_floor_held()
 	end)
+	PlagueLink.build(self)
 	self.probe = UILayoutProbe.new(self)
 	local interact = UIInteract.new(ctx)
 	interact.bar = bar
@@ -1604,10 +1650,15 @@ function UIRoot._on_play_solo(self, difficulty: number)
 	if self:_hop_instead(difficulty, false) then
 		return
 	end
+	-- RoPlague: the pathogen window first; its START comes back here with the pick
+	if not self._plague_go and PlagueLink.open_picker(self, difficulty) then
+		return
+	end
+	self._plague_go = false
 	self._solo_msec = UICtx.msec()
 	ctx:set_setting("difficulty", difficulty)
 	ctx:sfx("click")
-	ctx:session_call("start_solo", { difficulty, UIMaps.valid(ctx:setting("map_id", UIMaps.DEFAULT_ID)) })
+	ctx:session_call("start_solo", { difficulty, UIMaps.valid(ctx:setting("map_id", UIMaps.DEFAULT_ID)), self._plague_opts })
 end
 
 --- A fresh solo match from inside one: the results screen's "Play again", the game menu's "Restart
@@ -1632,7 +1683,7 @@ function UIRoot._restart_solo(self, difficulty: number)
 	ctx:set_setting("difficulty", difficulty)
 	ctx:sfx("click")
 	self._restart_pending = true
-	ctx:session_call("start_solo", { difficulty, UIMaps.valid(ctx:setting("map_id", UIMaps.DEFAULT_ID)) })
+	ctx:session_call("start_solo", { difficulty, UIMaps.valid(ctx:setting("map_id", UIMaps.DEFAULT_ID)), self._plague_opts })
 	self:_update_pause()
 end
 
@@ -1820,6 +1871,7 @@ function UIRoot._bind_state(self, s: any)
 			ctx.play_start_tick = 0.0
 		end
 	end
+	PlagueLink.bind_state(self, s)
 	self:_schedule_rebind()
 end
 
@@ -1982,7 +2034,11 @@ function UIRoot._compute_screen(self): string
 		return "title"
 	end
 	local ph = ctx.state.phase
-	if ph == Defs.PHASE_SPAWN then
+	local pl = ctx.state.plague
+	if ph == Defs.PHASE_SPAWN and pl ~= nil and (pl.cure_pid or 0) ~= 0 and ctx.state.local_owner == pl.cure_pid then
+		-- (RoPlague: a 1v1's cure side plays while the plague picks patient zero)
+		return "play"
+	elseif ph == Defs.PHASE_SPAWN then
 		return "spawn"
 	elseif ph == Defs.PHASE_PLAYING then
 		return if ctx:needs_spawn() then "spawn" else "play"
@@ -2071,6 +2127,7 @@ function UIRoot._apply_screen(self)
 		end
 	end
 	self:_play_music(scr)
+	PlagueLink.apply_screen(self, scr, changed)
 	if scr == "over" and not self.over.is_open and not self._stats.over and ctx.state ~= nil then
 		self.advisor:on_game_over(ctx.state.winner, ctx.state.over_reason)
 	end
@@ -2114,6 +2171,7 @@ function UIRoot._update_input_gate(self)
 		or (self.arsenal ~= nil and self.arsenal.is_open)
 		or (self.starter ~= nil and self.starter.is_open)
 		or (self.general ~= nil and self.general.is_open)
+		or PlagueLink.modal_open(self)
 	ctx:set_world_input(not modal and not self.rotate_card.visible and not self.radial.is_open)
 	self.feed:set_visible(self.hud.visible and not self.over.is_open)
 	self.coach:set_visible(
@@ -2125,6 +2183,7 @@ function UIRoot._update_input_gate(self)
 	self.spectate_pill:set_visible(
 		self.hud.visible and self._screen ~= "spawn" and not ctx:alive_player() and not self.over.is_open
 	)
+	PlagueLink.gate(self)
 	self._spec_again:set_visible(ctx:mode() == UICtx.MODE_SOLO)
 	-- a public match's own server: leaving goes back to a hub (the title with the lobby list)
 	self._spec_leave:set_text(if ctx:mode() == UICtx.MODE_MULTI then "Leave" else "Title")
@@ -2150,6 +2209,8 @@ function UIRoot._update_pause(self)
 		or self.pause.is_open
 		or (self.takeover ~= nil and self.takeover:pending())
 		or (self.arsenal ~= nil and self.arsenal.is_open)
+		-- RoPlague: the Evolve and Rename windows hold the plague still while you read
+		or PlagueLink.modal_open(self)
 	)
 		and ctx:mode() == UICtx.MODE_SOLO
 		and ctx:in_match()
@@ -2311,6 +2372,7 @@ function UIRoot._layout(self)
 	end
 	self.rotate_card:refresh()
 	ctx:fit_canvas(self.radial.gui)
+	PlagueLink.layout(self)
 	self.probe:update_world_safe_area()
 	ctx.layout_changed:Fire()
 end
@@ -2370,6 +2432,7 @@ local function slow_poll(self)
 		self:_update_pause()
 	end
 	self:_poll_layout()
+	PlagueLink.poll(self)
 	self:_update_music()
 end
 

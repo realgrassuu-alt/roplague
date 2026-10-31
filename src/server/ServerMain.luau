@@ -47,6 +47,10 @@ local Purchases = require(script.Parent.Purchases) :: any
 local Rewards = require(script.Parent.Rewards) :: any
 local General = require(script.Parent.General) :: any
 local Subscription = require(Shared.Data.Subscription) :: any
+-- RoPlague's multiplayer (2026-10-30): the lobby / online places, the modes, matchmaking and rooms
+local Places = require(Shared.Data.Places) :: any
+local PlagueModes = require(Shared.Data.PlagueModes) :: any
+local PlagueMatch = require(script.Parent.PlagueMatch) :: any
 local MarketplaceService = game:GetService("MarketplaceService")
 local PolicyService = game:GetService("PolicyService")
 local DataStoreService = game:GetService("DataStoreService")
@@ -54,6 +58,9 @@ local DataStoreService = game:GetService("DataStoreService")
 local OP = Protocol.OP
 
 local ServerMain = {}
+--- RoWorld's public war matches (LobbyDirectory: 50-player lobbies on a schedule). RoPlague's title
+--- cards are its own modes instead (2026-10-30, server/PlagueMatch); true brings the war lobbies back.
+ServerMain.WAR_PUBLIC = false
 ServerMain.server = nil :: any
 --- Messages a client may send per second before the rest is ignored (intents have their own 30/s).
 ServerMain.MAX_MESSAGES_PER_SEC = 90
@@ -96,7 +103,11 @@ local function report_once(where: string, err: any)
 end
 
 local function core(name: string): any
-	local m = Shared.Core:FindFirstChild(name)
+	-- ("Plague/PlagueSim": a module in a folder of Core)
+	local m: Instance? = Shared.Core
+	for part in string.gmatch(name, "[^/]+") do
+		m = if m ~= nil then m:FindFirstChild(part) else nil
+	end
 	if m == nil then
 		return nil
 	end
@@ -180,6 +191,10 @@ function ServerMain.start()
 	-- everyone goes back to a hub). Studio has no teleports: a joined lobby runs on the same server.
 	local is_match_server = game.PrivateServerId ~= "" and game.PrivateServerOwnerId == 0
 	ServerMain.kind = if is_match_server then "match" else "hub"
+	-- RoPlague: the online place's servers play the matches PlagueMatch made (the room comes with the
+	-- players' teleport data); back to a hub means back to the lobby place
+	local online = game.PlaceId == Places.ONLINE
+	ServerMain.online = online
 	-- Team games and parties (docs/teams-and-parties.md): on Staging only at first, then
 	-- in production too (since 2026-10-10). TEAM_GAMES_LIVE = false puts
 	-- production back to two free-for-all lobbies and no parties.
@@ -287,7 +302,7 @@ function ServerMain.start()
 		end
 	end
 	ServerMain.lobby_store = store
-	local teleports = Teleports.for_place(game.PlaceId)
+	local teleports = Teleports.for_place(if online then Places.LOBBY else game.PlaceId)
 	local function lobby_maps(): { any }
 		local out = {}
 		for _, m in MapList.maps do
@@ -306,7 +321,7 @@ function ServerMain.start()
 	local host: any = nil
 	--- Studio stand-in for a lobby's reserved server: the lobby this server plays locally.
 	local studio_lobby: any = nil
-	if is_match_server then
+	if is_match_server and not online then
 		host = MatchHost.new({
 			store = store,
 			psid = game.PrivateServerId,
@@ -315,7 +330,7 @@ function ServerMain.start()
 			log = print,
 		})
 		ServerMain.host = host
-	else
+	elseif not online and ServerMain.WAR_PUBLIC then
 		directory = LobbyDirectory.new({
 			store = store,
 			teleport = teleports,
@@ -483,7 +498,7 @@ function ServerMain.start()
 	end
 
 	local server = MatchServer.new({
-		lobby = if is_match_server then lobby_hooks() else nil,
+		lobby = if is_match_server and not online then lobby_hooks() else nil,
 		-- the head shots bot players wear beside their names (Roblox user ids; server only)
 		bot_faces = BotFaces,
 		-- what a player wears in a match (Data/Cosmetics; the match server sends it to everyone)
@@ -500,8 +515,54 @@ function ServerMain.start()
 			end
 		end,
 		make_sim = function(config: { [string]: any }): any
-			local Sim = core("Sim")
 			local WorldMap = core("WorldMap")
+			-- RoPlague: a plague match (1v1, Plague Race, teams; server/PlagueMatch.room_hooks)
+			if type(config.plague) == "table" then
+				local PlagueSim = core("Plague/PlagueSim")
+				local Countries = core("Plague/Countries")
+				if PlagueSim == nil or WorldMap == nil then
+					error("Core PlagueSim is not available")
+				end
+				local pc = config.plague
+				-- the room's map (a rotation), if its country layer loads; else the World
+				local map = WorldMap.get("world")
+				local want = if type(pc.map) == "string" then pc.map else config.map_id
+				if type(want) == "string" and want ~= "world" then
+					local ok_m, m = pcall(WorldMap.get, want)
+					if ok_m and m ~= nil and Countries ~= nil and Countries.get(m) ~= nil then
+						map = m
+					else
+						warn("[PlagueMatch] no country layer for " .. tostring(want) .. ": playing the World")
+					end
+				end
+				local specs = PlagueMatch.plague_specs({
+					mode = pc.mode,
+					roles = pc.roles or {},
+					names = pc.names or {},
+					expect = (function()
+						local list = {}
+						for uid in pc.roles or {} do
+							table.insert(list, uid)
+						end
+						table.sort(list)
+						return list
+					end)(),
+				})
+				if specs ~= nil and #specs == 1 and RunService:IsStudio() then
+					-- (Studio, one player: an unplayed rival plague that spreads by itself, to try a shared world)
+					specs[2] = { name = "Rival Plague", near = true }
+				end
+				return PlagueSim.new(map, {
+					seed = pc.seed or config.seed,
+					difficulty = 1,
+					max_humans = 9,
+					mode = pc.mode,
+					roles = pc.roles,
+					name = pc.name,
+					plagues = specs,
+				})
+			end
+			local Sim = core("Sim")
 			if Sim == nil or WorldMap == nil then
 				error("Core Sim is not available")
 			end
@@ -528,8 +589,13 @@ function ServerMain.start()
 	local public_sent: { [Player]: { id: string, uid: string, mode: string, at: number, retried: boolean } } = {}
 	--- the kinds of public match a player may ask for here (the title's cards)
 	local public_kinds = {}
-	for _, k in LobbyRules.kinds(TEAM_GAMES) do
-		table.insert(public_kinds, k.mode)
+	if ServerMain.WAR_PUBLIC then
+		for _, k in LobbyRules.kinds(TEAM_GAMES) do
+			table.insert(public_kinds, k.mode)
+		end
+	else
+		-- RoPlague: the title's cards are the multiplayer modes
+		public_kinds = table.clone(PlagueModes.ORDER)
 	end
 	local function public_state(players: { Player }, state: string, mode: string?, extra: any?)
 		for _, m in players do
@@ -686,6 +752,190 @@ function ServerMain.start()
 		end
 	end
 	ServerMain.public_join = public_join
+
+	-- RoPlague's multiplayer (server/PlagueMatch) ----------------------------------------------------
+	local TeleportService = game:GetService("TeleportService")
+	local plague_room: any = nil
+	local function present_uids_set(): { [string]: boolean }
+		local set = {}
+		for _, p in Players:GetPlayers() do
+			set[tostring(p.UserId)] = true
+		end
+		return set
+	end
+	--- Back to the lobby place (Studio: back to the title on this server).
+	local function plague_home(list: { any })
+		local ps = {}
+		for _, p in list do
+			if typeof(p) == "Instance" and p.Parent == Players then
+				table.insert(ps, p)
+			end
+		end
+		if #ps == 0 then
+			return
+		end
+		if online and not RunService:IsStudio() then
+			task.spawn(function()
+				pcall(TeleportService.TeleportAsync, TeleportService, Places.LOBBY, ps)
+			end)
+		else
+			for _, p in ps do
+				send(p, OP.RACE, "home")
+			end
+			plague_room = nil
+			server.deps.lobby = nil
+		end
+	end
+	local room_deps = { now = os.clock, present = present_uids_set, to_lobby = plague_home }
+	--- Plays `room` on this server: the online place's match, or Studio's stand-in for one.
+	local function plague_play(room: any)
+		plague_room = room
+		server.deps.lobby = PlagueMatch.room_hooks(room, room_deps)
+		server._finished = false
+		print(("[PlagueMatch] playing a %s room on %s for %d players"):format(room.mode, tostring(room.map), #room.expect))
+	end
+	ServerMain.plague_play = plague_play
+	if RunService:IsStudio() then
+		-- (Studio only, to try a match's late game: workspace attribute RP_DEV = "research" starts the
+		-- cure's research, "funds" gives the cure 50 funds; read once a second, then cleared)
+		task.spawn(function()
+			while true do
+				task.wait(1)
+				local cmd = workspace:GetAttribute("RP_DEV")
+				local sim = server._mp_sim
+				if type(cmd) == "string" and sim ~= nil and sim.cure_funds ~= nil then
+					workspace:SetAttribute("RP_DEV", nil)
+					if cmd == "research" then
+						sim.research = true
+						sim.aware = math.max(sim.aware, 1)
+					elseif cmd == "funds" then
+						sim.cure_funds += 50
+					end
+					sim._pl_dirty = true
+					print("[PlagueMatch] Studio dev: " .. cmd)
+				end
+			end
+		end)
+	end
+	local pm: any = nil
+	if not is_match_server and not online then
+		local ok_pm_store, pm_store = pcall(PlagueMatch.memory_store)
+		if not ok_pm_store then
+			warn("[PlagueMatch] MemoryStore unavailable, matchmaking on this server only: " .. tostring(pm_store))
+			pm_store = PlagueMatch.local_store()
+		end
+		pm = PlagueMatch.new({
+			store = pm_store,
+			job = game.JobId,
+			now = os.time,
+			studio = RunService:IsStudio(),
+			reserve = function(): string
+				local code = TeleportService:ReserveServer(Places.ONLINE)
+				return code
+			end,
+			teleport = function(players: { Player }, code: string, room: any): (boolean, any)
+				local opts = Instance.new("TeleportOptions")
+				opts.ReservedServerAccessCode = code
+				opts:SetTeleportData({ rp = room })
+				return pcall(TeleportService.TeleportAsync, TeleportService, Places.ONLINE, players, opts)
+			end,
+			start_local = function(players: { Player }, room: any)
+				-- Studio: the match plays here, everyone in it is in it at once
+				public_state(players, "idle", room.mode)
+				plague_play(room)
+				for _, m in players do
+					local nm = if m.DisplayName ~= "" then m.DisplayName else m.Name
+					server:on_client(m, { uid = tostring(m.UserId), name = nm }, OP.JOIN, nm)
+				end
+			end,
+			state = function(players: { Player }, st: string, mode: string?, extra: any?)
+				public_state(players, st, mode, extra)
+			end,
+			new_id = function(): string
+				return HttpService:GenerateGUID(false)
+			end,
+			seed = function(): number
+				return math.random(1, 2 ^ 31 - 2)
+			end,
+			log = print,
+		})
+		ServerMain.plague_match = pm
+		task.spawn(function()
+			while true do
+				task.wait(1)
+				local ok_tick, err_tick = pcall(pm.tick, pm)
+				if not ok_tick then
+					report_once("PlagueMatch.tick", err_tick)
+				end
+			end
+		end)
+		task.spawn(function()
+			while true do
+				task.wait(2)
+				local view = pm:view()
+				for _, p in listening_list do
+					send(p, OP.LOBBIES, view, public_kinds)
+				end
+			end
+		end)
+	end
+	--- A mode's card was pressed (a party leader: for the party): into the line.
+	local function plague_join(player: Player, mode: string, role: any)
+		if pm == nil then
+			return
+		end
+		if party ~= nil and party:key_of(player) ~= nil and not party:is_leader(player) then
+			send(player, OP.JOIN_RESULT, false, "Your party leader picks the match.")
+			send(player, OP.NOTICE, "Your party leader picks the match.", 1)
+			return
+		end
+		local group = public_group(player)
+		if group == nil then
+			return
+		end
+		-- (the one who pressed it first: a 1v1's side is theirs, a friend with them plays the other)
+		local players = { player }
+		for _, p in group do
+			if p ~= player then
+				table.insert(players, p)
+			end
+		end
+		local ok, why = pm:join(public_key(player), players, mode, if type(role) == "string" then role else nil)
+		if not ok and why ~= nil then
+			send(player, OP.JOIN_RESULT, false, why)
+			send(player, OP.NOTICE, why, 1)
+		end
+	end
+	-- the online place: the room arrives with the first player; anyone without one goes to the lobby
+	if online then
+		local function arrived(player: Player)
+			local data = nil
+			pcall(function()
+				local jd = player:GetJoinData()
+				data = if type(jd.TeleportData) == "table" then jd.TeleportData.rp else nil
+			end)
+			local room = PlagueMatch.clean_room(data)
+			if plague_room == nil and room ~= nil then
+				plague_play(room)
+			end
+			if plague_room == nil then
+				if not RunService:IsStudio() then
+					task.spawn(function()
+						pcall(TeleportService.TeleportAsync, TeleportService, Places.LOBBY, { player })
+					end)
+				end
+			end
+		end
+		Players.PlayerAdded:Connect(arrived)
+		for _, p in Players:GetPlayers() do
+			arrived(p)
+		end
+	end
+	Players.PlayerRemoving:Connect(function(player: Player)
+		if pm ~= nil then
+			pm:player_left(player)
+		end
+	end)
 	-- a public-match teleport that failed after it began: the seat goes back, and once the player is
 	-- put in line again on their own
 	if directory ~= nil and not RunService:IsStudio() then
@@ -752,6 +1002,8 @@ function ServerMain.start()
 			send(player, OP.LOBBY, server:lobby_info(player))
 			if directory ~= nil then
 				send(player, OP.LOBBIES, directory:view(), public_kinds)
+			elseif pm ~= nil then
+				send(player, OP.LOBBIES, pm:view(), public_kinds)
 			end
 			-- the stored settings (size-capped) go out once, not on every HELLO
 			SettingsStore.replay(player, function(data: any)
@@ -778,9 +1030,15 @@ function ServerMain.start()
 			end
 		elseif op == OP.JOIN_PUBLIC then
 			-- Quick Play: a public match of a kind ("ffa" | "team" | "world"), or false to leave the line
-			local mode = ...
+			local mode, role = ...
+			local pmm = pm
 			if mode == false then
+				if pmm ~= nil and pmm:cancel(public_key(player)) then
+					return
+				end
 				public_cancel(player)
+			elseif PlagueModes.get(mode) ~= nil then
+				plague_join(player, mode, role)
 			elseif LobbyRules.is_mode(mode) and (mode ~= LobbyRules.MODE_TEAM or TEAM_GAMES) then
 				public_join(player, mode)
 			end
@@ -1067,6 +1325,16 @@ function ServerMain.start()
 					pcall(Analytics.report, player, "credit_used", kind)
 				end
 			end)
+		elseif op == OP.RACE then
+			-- RoPlague: "leave" a match (back to the lobby place)
+			local what = ...
+			if what == "leave" then
+				if online and not RunService:IsStudio() then
+					task.spawn(function()
+						pcall(TeleportService.TeleportAsync, TeleportService, Places.LOBBY, { player })
+					end)
+				end
+			end
 		elseif op == OP.LEAVE and is_match_server then
 			-- leaving a public match's server = back to a hub
 			pcall(Analytics.report, player, "left")
@@ -1315,12 +1583,22 @@ function ServerMain.start()
 	local got_store, purchase_store = pcall(function()
 		return DataStoreService:GetDataStore(store_name)
 	end)
+	-- (Studio with "Studio access to API services" off: the store exists but every call is refused,
+	-- so a test purchase could never be stored; it gets the session store below instead)
+	if got_store and RunService:IsStudio() then
+		local probe = pcall(function()
+			return (purchase_store :: any):GetAsync("probe")
+		end)
+		if not probe then
+			got_store = false
+		end
+	end
 	if not got_store then
 		if not RunService:IsStudio() then
 			error(purchase_store)
 		end
 		-- an unpublished place open in Studio has no DataStores: the records last for this session
-		warn("[Purchases] no DataStore here (an unpublished place): purchases are kept for this session only")
+		warn("[Purchases] no DataStore here (an unpublished place, or Studio without API access): purchases are kept for this session only")
 		local rows: { [string]: any } = {}
 		purchase_store = {
 			GetAsync = function(_: any, k: string): any
@@ -1426,6 +1704,42 @@ function ServerMain.start()
 			pcall(General.tick)
 		end
 	end)
+	-- RoPlague: the Arsenal items sold as gamepasses (Data/Arsenal `pass`, Data/Gamepasses): an owner gets
+	-- the unlock on their record, once (the receipt "pass:<key>" makes a second grant a no-op), so it
+	-- reaches the match like any other perk
+	local Catalog = require(ReplicatedStorage:WaitForChild("Airfront").Data.Arsenal) :: any
+	local Gamepasses = require(ReplicatedStorage:WaitForChild("Airfront").Data.Gamepasses) :: any
+	local function grant_pass(player: Player, it: any)
+		local gp = Gamepasses[it.pass]
+		if gp == nil or (gp.id or 0) <= 0 or Purchases.has_unlock(player, it.key) then
+			return
+		end
+		pcall(Purchases.grant, player.UserId, "unlock:" .. it.key, "pass:" .. it.key, 1, 0)
+	end
+	local function check_passes(player: Player)
+		for _, it in Catalog.ITEMS do
+			local gp = if it.pass ~= nil then Gamepasses[it.pass] else nil
+			if gp ~= nil and (gp.id or 0) > 0 and not Purchases.has_unlock(player, it.key) then
+				local ok, has = pcall(function()
+					return MarketplaceService:UserOwnsGamePassAsync(player.UserId, gp.id)
+				end)
+				if ok and has and player.Parent ~= nil then
+					grant_pass(player, it)
+				end
+			end
+		end
+	end
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player: Player, pass_id: number, bought: boolean)
+		if not bought then
+			return
+		end
+		for _, it in Catalog.ITEMS do
+			local gp = if it.pass ~= nil then Gamepasses[it.pass] else nil
+			if gp ~= nil and tonumber(gp.id) == tonumber(pass_id) then
+				task.spawn(grant_pass, player, it)
+			end
+		end
+	end)
 	MarketplaceService.ProcessReceipt = function(info: any): Enum.ProductPurchaseDecision
 		local ok, r = pcall(Purchases.process_receipt, info)
 		if ok and r == "granted" then
@@ -1437,7 +1751,10 @@ function ServerMain.start()
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 	Players.PlayerAdded:Connect(function(player: Player)
-		task.spawn(Purchases.load, player)
+		task.spawn(function()
+			Purchases.load(player)
+			check_passes(player)
+		end)
 		task.spawn(check_policy, player)
 		task.spawn(General.joined, player)
 		Analytics.joined(player)
@@ -1452,7 +1769,10 @@ function ServerMain.start()
 		end
 	end)
 	for _, p in Players:GetPlayers() do
-		task.spawn(Purchases.load, p)
+		task.spawn(function()
+			Purchases.load(p)
+			check_passes(p)
+		end)
 		task.spawn(check_policy, p)
 		task.spawn(General.joined, p)
 		Analytics.joined(p)

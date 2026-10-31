@@ -115,6 +115,9 @@ Defs.NUKE_UNLOCK = { [0] = 0, 0, 0, 0, 1, 2, 8, 16, 32 }
 
 -- Tile flags (GameState.flags / delta "flags")
 Defs.F_FALLOUT = 1
+--- RoPlague: the tile is infected / its people are dead (F_DEAD is set with F_INF).
+Defs.F_INF = 2
+Defs.F_DEAD = 4
 
 -- Unit removal reasons
 Defs.DEL_ARRIVED = 0
@@ -134,6 +137,13 @@ Defs.OVER_DOMINATION = 0
 Defs.OVER_TIME = 1
 Defs.OVER_DEFEATED = 2
 Defs.OVER_ABANDONED = 3
+--- RoPlague: the world finished the cure first (solo).
+Defs.OVER_CURED = 4
+--- RoPlague: humanity is gone (a win) / the disease died out (a loss).
+Defs.OVER_EXTINCT = 5
+Defs.OVER_BURNOUT = 6
+--- RoPlague multiplayer (a shared world, several plagues): the last plague still spreading wins
+Defs.OVER_LAST = 7
 
 -- Map atlas cells (assets/icons/map_atlas.png, 8 x 2 cells of 128 px) as {x, y} (Vector2i in GDScript).
 Defs.ATLAS_CITY = { x = 0, y = 0 }

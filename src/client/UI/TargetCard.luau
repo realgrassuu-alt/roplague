@@ -190,7 +190,7 @@ function TargetCard.show_target(self, t: number, k: string, act: any)
 			self._odds:set_color(UITheme.ORANGE)
 			self._odds_warn = true
 		else
-			self._odds:set_text(string.format("You would send %s troops", troops))
+			self._odds:set_text(string.format("You would send %s infected", troops))
 			self._odds:set_color(UITheme.TEXT_3)
 			self._odds_warn = false
 		end
@@ -247,7 +247,7 @@ function TargetCard.show_target(self, t: number, k: string, act: any)
 		self._odds:set_visible(self._odds_warn)
 	elseif c and self.owner_id == 0 then
 		self._odds:set_visible(false)
-		self._sub:set_text(string.format("%s · across the sea · lands %s troops", ctx:terrain_title(t), troops))
+		self._sub:set_text(string.format("%s · across the sea · lands %s infected", ctx:terrain_title(t), troops))
 	end
 	for _, b in ipairs({ self._go, self._ally }) do
 		b:set_min_height(if c then 44.0 else 48.0)

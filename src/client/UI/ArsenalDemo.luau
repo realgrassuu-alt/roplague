@@ -138,9 +138,9 @@ function ArsenalDemo.preload()
 			add(v.id)
 		end
 	end
-	if MAPS ~= nil then
-		add(MAPS.id)
-	end
+	-- (RoPlague: not the war map, Assets/ArsenalMaps: no item the shop sells draws it any more, the 2x
+	-- Stars scene is on Assets/PerkMaps now, and its image was the original developer's upload, which
+	-- never loads in our experience)
 	for _, k in { "mega", "scatter", "airfield", "reinforce" } do
 		local r = AA.renders and AA.renders[k]
 		if r ~= nil then

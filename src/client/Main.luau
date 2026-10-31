@@ -274,8 +274,10 @@ end
 local function focus_home()
 	local session = Main.session
 	local state = session and session.state
-	if state ~= nil and state.local_owner ~= 0 then
-		call(Main.world, "focus_owner", state.local_owner)
+	-- RoPlague: the disease owns no land; Home centres on patient zero's country
+	local home = call(Main.ui, "home_owner")
+	if state ~= nil and type(home) == "number" and home > 0 then
+		call(Main.world, "focus_owner", home)
 	end
 end
 
@@ -387,7 +389,7 @@ local function build_hud(player: Player)
 	make_button(h, "leaderboard", "leaderboard", "Leaderboard (Tab)", 3, function()
 		call(Main.ui, "toggle_leaderboard")
 	end)
-	make_button(h, "home", "globe", "Center on your nation (Home)", 4, focus_home)
+	make_button(h, "home", "globe", "Center on patient zero (Home)", 4, focus_home)
 	-- settings (2026-10-07): music, the border pops, labels; on the title too
 	make_button(h, "settings", "settings", "Settings", 5, function()
 		call(Main.ui, "open_settings")
@@ -554,7 +556,11 @@ function Main.start()
 	end
 	on_screen_changed(current_screen())
 	Main.boot.ui = os.clock()
-	Main.launch_hooks(player)
+	-- RoPlague: the in-game trailer (F6; Studio and the game's owner only, Trailer/Director)
+	local trailer = optional(client, { "Trailer", "Director" })
+	if trailer ~= nil and type(trailer.bind) == "function" then
+		pcall(trailer.bind, Main)
+	end
 	-- Dev diagnostics (workspace attribute AF_DIAG; never set in the shipped place).
 	if workspace:GetAttribute("AF_DIAG") == true then
 		local diag = optional(client, { "Dev", "SessionDiag" })
@@ -562,84 +568,6 @@ function Main.start()
 			diag.start(Main)
 		end
 	end
-end
-
--- Owner-only real-client test hook: joining with launchData "autosolo[:lat,lon]" (e.g.
--- roblox://experiences/start?placeId=137151641329864&launchData=autosolo:48,10) starts a Standard solo
--- match and picks the unclaimed land nearest to lat/lon, so the published game can be verified on a
--- real Roblox client without clicking through the title. Ignored for everyone else.
-Main.OWNER_USER_ID = 22641473
-function Main.launch_hooks(player: Player)
-	task.spawn(function()
-		local ld = player:GetAttribute("AF_LaunchData")
-		local t0 = os.clock()
-		while ld == nil and os.clock() - t0 < 6 do
-			task.wait(0.25)
-			ld = player:GetAttribute("AF_LaunchData")
-		end
-		if type(ld) ~= "string" or string.sub(ld, 1, 8) ~= "autosolo" then
-			return
-		end
-		if player.UserId ~= Main.OWNER_USER_ID and not game:GetService("RunService"):IsStudio() then
-			return
-		end
-		local lat, lon = 30.0, 100.0
-		local a, b = string.match(ld, "^autosolo:(%-?[%d%.]+),(%-?[%d%.]+)$")
-		if a and b then
-			lat, lon = tonumber(a) or lat, tonumber(b) or lon
-		end
-		local session = Main.session
-		-- wait for the title world, then start solo through the UI's own path
-		while session.state == nil or session:is_building() do
-			task.wait(0.2)
-		end
-		task.wait(1.0)
-		if Main.ui ~= nil and type(Main.ui._on_play_solo) == "function" then
-			pcall(Main.ui._on_play_solo, Main.ui, 1)
-		else
-			session:start_solo(1)
-		end
-		-- spawn phase of the new solo world: pick the nearest unclaimed contestable land
-		local deadline = os.clock() + 30
-		while os.clock() < deadline do
-			task.wait(0.2)
-			local st = session.state
-			if st ~= nil and st.map ~= nil and st.local_owner ~= 0 and not session:is_building() then
-				local map = st.map
-				local c = map:latlon_to_tile(lat, lon)
-				local cx, cy = c % 1024, c // 1024
-				local best = nil
-				for r = 0, 60 do
-					for dy = -r, r do
-						for dx = -r, r do
-							if math.max(math.abs(dx), math.abs(dy)) == r then
-								local y = cy + dy
-								if y >= 0 and y < 512 then
-									local t = y * 1024 + (cx + dx) % 1024
-									if map:is_contestable(t) and st:owner_of(t) == 0 then
-										best = t
-										break
-									end
-								end
-							end
-						end
-						if best then
-							break
-						end
-					end
-					if best then
-						break
-					end
-				end
-				if best ~= nil then
-					session:send_intent({ type = "spawn", tile = best })
-					call(Main.world, "focus_tile", best, -1.0, 1.0)
-					print("[RoWorld] autosolo: spawn requested at tile", best)
-				end
-				return
-			end
-		end
-	end)
 end
 
 return Main

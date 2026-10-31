@@ -1498,6 +1498,29 @@ function Diag.start(Main: any)
 				ui.feed:alliance_request(tonumber(words[3]) or 0)
 			end
 			return "fed"
+		elseif op == "plague" then
+			-- solo plague only: `plague dna <n>` sets the DNA; `plague evolve [tree]` buys every evolution
+			-- (of one tree), through the sim's own intents so the mirror hears of each
+			local sim = session:local_sim()
+			if sim == nil or sim.owned == nil then
+				return "not in a plague match"
+			end
+			if words[2] == "dna" then
+				sim.dna = tonumber(words[3]) or 1000
+				return ("dna %d"):format(sim.dna)
+			elseif words[2] == "evolve" then
+				local Traits = require(game:GetService("ReplicatedStorage").Airfront.Data.Traits) :: any
+				sim.dna = math.max(sim.dna, 1e6)
+				local n = 0
+				for _, t in Traits.list do
+					if (words[3] == nil or t.tree == words[3]) and not sim.owned[t.id] then
+						table.insert(sim._intents, { type = "evolve", id = t.id })
+						n += 1
+					end
+				end
+				return ("evolve %d queued"):format(n)
+			end
+			return "plague dna <n> | plague evolve [tree]"
 		elseif op == "gold" then
 			-- solo only: set the local player's gold (placement previews, build tests)
 			local sim = session:local_sim()

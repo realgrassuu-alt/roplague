@@ -120,6 +120,10 @@ function Row.set_attack(self, a: any, touch: boolean)
 	end
 	-- a retreating attack says so and can't be recalled again
 	local name = if other ~= 0 then s:owner_name(other) else "Expansion"
+	if a.country ~= nil and a.country ~= 0 then
+		-- (RoPlague's shared world: the country fought over, then the plague on the other side)
+		name = s:owner_name(a.country) .. "  ·  " .. name
+	end
 	self.name_l:set_text(if a.retreating then name .. " (retreating…)" else name)
 	T.set_font_color(self.name_l, if incoming then Color3.new(1.0, 0.82, 0.84) else T.TEXT)
 	self.troops_l:set_text(T.fmt_troops(a.troops))

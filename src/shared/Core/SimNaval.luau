@@ -5,6 +5,7 @@
 -- only arrivals run logic.
 
 local Defs = require("./Defs")
+local PLAGUE_FX = (require("../Data/WarTraits") :: any).effects({})
 local Coop = require("../Net/Coop")
 local Rules = require("./Rules")
 local SimNav = require("./SimNav")
@@ -99,7 +100,8 @@ function SimNaval.install(C)
 			return false
 		end
 		-- (a person: kind human and no bot; a bot player's AI holds itself to the AI's limit)
-		if self.o_boats[id] >= Rules.max_boats(self.o_tiles[id], self.o_kind[id] == Defs.KIND_HUMAN and self.o_bot[id] ~= 1) then
+		local fx = if self.fx_of ~= nil then self:fx_of(id) else PLAGUE_FX
+		if self.o_boats[id] >= Rules.max_boats(self.o_tiles[id], self.o_kind[id] == Defs.KIND_HUMAN and self.o_bot[id] ~= 1) + fx.boats then
 			self:msg(id, Defs.MSG_INFO, "Too many transports at sea")
 			return false
 		end
@@ -139,7 +141,7 @@ function SimNaval.install(C)
 		u.owner = id
 		u.path = path
 		u.start_tick = tick
-		u.tpt = self.R.TRANSPORT_TPT_X100
+		u.tpt = math.max(1, math.floor(self.R.TRANSPORT_TPT_X100 * fx.boat))
 		u.troops = troops
 		u.target_tile = t
 		u.body = water_body

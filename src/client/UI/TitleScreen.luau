@@ -37,9 +37,9 @@ TitleScreen.WORD_MAX_W = 0.35
 --- The credits line under the dock (desktop, phones). It points at the help window by its top-bar name
 --- (2026-10-25: "See Help & Credits" instead of "see How to play"; 2026-10-26: no map credit, the World
 --- map is RoWorld's own, made from public-domain data).
-TitleScreen.CREDITS = "© OpenFront and Contributors  ·  Music by Rodrigo Flores  ·  "
+TitleScreen.CREDITS = "© OpenFront and Contributors  ·  RoWorld © Snick Co.  ·  "
 	.. "GNU AGPL v3, no warranty: See Help & Credits"
-TitleScreen.CREDITS_SHORT = "© OpenFront and Contributors  ·  Music: Rodrigo Flores  ·  GNU AGPL v3"
+TitleScreen.CREDITS_SHORT = "© OpenFront and Contributors  ·  RoWorld © Snick Co.  ·  GNU AGPL v3"
 
 local SHINE_HALF = 70.0 -- smoothstep(0, 70, |x - sweep - (y - y0) * 0.35|)
 
@@ -287,9 +287,10 @@ end
 TitleScreen.JOIN_CLOSE_S = 5
 TitleScreen.DIFFS = { [0] = "Relaxed", "Standard", "Brutal" }
 TitleScreen.DIFF_BLURB = {
-	[0] = "Gentle AI: slower growth and a long early peace.",
-	"A fair fight: nations respect a short early peace.",
-	"Aggressive AI that grows fast and hunts you early.",
+	-- (RoPlague: solo is the plague, so these say how hard the cure race is: PlagueRules.CURE_DAYS)
+	[0] = "The cure is slow, about a year of work. Good to learn on.",
+	"A fair race: the cure takes about six months.",
+	"The world fights back hard: a fast cure and borders that close early.",
 }
 
 local INK = Color3.new(0.01, 0.015, 0.05)
@@ -346,6 +347,8 @@ function TitleScreen.new(c: any)
 	W.Control._init(self)
 	self.ctx = c
 	self.play_solo = Signal.new()
+	--- RoPlague: the PLAY SOLO window's plague name was pressed (PlagueLink opens the Rename window)
+	self.rename_plague = Signal.new()
 	--- the map button: UIRoot opens the map picker
 	self.pick_map = Signal.new()
 	self.play_multi = Signal.new()
@@ -396,6 +399,7 @@ function TitleScreen.new(c: any)
 	self:_build_head()
 	self:_build_dock()
 	self:_build_queue()
+	self:_build_side_pick()
 	self:_build_solo_menu()
 	-- credits: the copyright notice the code's licence asks to keep visible, Rodrigo Flores'
 	-- soundtrack (Orchestral Ambients) and the licence (2026-10-25: the full
@@ -492,7 +496,7 @@ function TitleScreen._build_head(self)
 	self:add_child(self._glow)
 	self:move_child(self._glow, 3)
 
-	local word = GradientText.new("ROWORLD", 120, 900)
+	local word = GradientText.new("ROPLAGUE", 120, 900)
 	word.spacing = 14
 	word.shadow = { color = Color3.new(0.0, 0.02, 0.08), alpha = 0.55, offset_y = 6, outline = 14 }
 	word:set_colors(Color3.new(1, 1, 1), Color3.new(1.0, 0.8, 0.52))
@@ -504,7 +508,7 @@ function TitleScreen._build_head(self)
 	self._tag_row:set_alignment(W.ALIGN_CENTER)
 	self._tag_l = tag_line(false)
 	self._tag_r = tag_line(true)
-	self._tag = UITheme.label("CONQUER THE REAL WORLD", 15, 600, Color3.new(0.86, 0.89, 0.97), 6)
+	self._tag = UITheme.label("INFECT THE REAL WORLD", 15, 600, Color3.new(0.86, 0.89, 0.97), 6)
 	self._tag_row:add_child(self._tag_l)
 	self._tag_row:add_child(self._tag)
 	self._tag_row:add_child(self._tag_r)
@@ -537,6 +541,15 @@ function TitleScreen._build_dock(self)
 	end)
 	self._map_btn = mb
 	self:set_map_name("World")
+	-- RoPlague: the plague's name, set before the match (the Rename pass; PlagueLink keeps it current)
+	local nb = UITheme.button("", "GlassButton", "pencil", 42.0)
+	nb.alignment = W.ALIGN_LEFT
+	nb:set_font_size(14)
+	nb.pressed:Connect(function()
+		self.rename_plague:Fire()
+	end)
+	self._name_btn = nb
+	self:set_plague_name("")
 
 	local dr = UITheme.hbox(8)
 	self._diff_row = dr
@@ -572,7 +585,7 @@ function TitleScreen._build_dock(self)
 	l1.size_flags_horizontal = W.EXPAND_FILL
 	l1.size_flags_vertical = W.SHRINK_CENTER
 	sec:add_child(l1)
-	local cap = UITheme.caption("Public matches", 11, UITheme.CYAN)
+	local cap = UITheme.caption("Play online", 11, UITheme.CYAN)
 	cap.size_flags_vertical = W.SHRINK_CENTER
 	sec:add_child(cap)
 	local l2 = UITheme.hdivider()
@@ -630,6 +643,11 @@ function TitleScreen.set_map_name(self, name: string)
 	self._map_btn:set_text("Map:  " .. name)
 end
 
+--- RoPlague: the name the next solo plague gets (PlagueLink.plague_name).
+function TitleScreen.set_plague_name(self, name: string)
+	self._name_btn:set_text(if name ~= "" then "Plague:  " .. name else "Name your plague")
+end
+
 --- One public-match card: map thumbnail, title, status line with a dot, and a JOIN pill.
 function TitleScreen._lobby_card(self, index: number): { [string]: any }
 	local btn = W.Button.new("", if index == 1 then "PublicButton" else "GlassButton")
@@ -643,8 +661,13 @@ function TitleScreen._lobby_card(self, index: number): { [string]: any }
 			if pub.state == "line" and pub.mode == card.mode then
 				self.leave_line:Fire()
 			elseif pub.state == "idle" and self._joining == nil then
-				self:set_public({ state = "joining", mode = card.mode })
-				self.join_public:Fire(card.mode)
+				if card.mode == "duel" then
+					-- (RoPlague's 1v1: the side first, then the line pairs it with the other side)
+					self:open_side_pick(card.lobby)
+				else
+					self:set_public({ state = "joining", mode = card.mode })
+					self.join_public:Fire(card.mode)
+				end
 			end
 		elseif index == 1 then
 			self.play_multi:Fire()
@@ -798,6 +821,84 @@ function TitleScreen._build_queue(self)
 	self._queue:set_visible(false)
 end
 
+--- RoPlague's 1v1 picker: play it as the virus or as the cure (Data/PlagueModes "duel"); the line
+--- then pairs the player with someone who picked the other side.
+function TitleScreen._build_side_pick(self)
+	self._side = GlassPanel.new(26.0, 22.0, 18, true, 28)
+	self:add_child(self._side)
+	local v = UITheme.vbox(10)
+	self._side:add_child(v)
+	local h = UITheme.hbox(12)
+	local uic = UITheme.icon_rect("cure", 26.0, UITheme.CYAN)
+	uic.size_flags_vertical = W.SHRINK_CENTER
+	h:add_child(uic)
+	local t = UITheme.label("1V1: PICK YOUR SIDE", 18, 800, UITheme.TEXT, 2)
+	t.size_flags_vertical = W.SHRINK_CENTER
+	h:add_child(t)
+	v:add_child(h)
+	self._side_sub = UITheme.label("You'll be matched with someone who picked the other side", 13, 600, UITheme.TEXT_2)
+	self._side_sub:set_autowrap(true)
+	self._side_sub:set_min_size(Vector2.new(340, 0))
+	v:add_child(self._side_sub)
+	local row = UITheme.hbox(10)
+	local virus = UITheme.button("VIRUS", "DangerButton", "virus", 52.0)
+	virus.size_flags_horizontal = W.EXPAND_FILL
+	local cure = UITheme.button("CURE", "PrimaryButton", "cure", 52.0)
+	cure.size_flags_horizontal = W.EXPAND_FILL
+	row:add_child(virus)
+	row:add_child(cure)
+	v:add_child(row)
+	local hints = UITheme.hbox(10)
+	local hv = UITheme.label("Spread and kill everyone", 11, 500, UITheme.TEXT_3)
+	hv.size_flags_horizontal = W.EXPAND_FILL
+	hv:set_alignment(W.ALIGN_CENTER)
+	local hc = UITheme.label("Research the cure, close borders", 11, 500, UITheme.TEXT_3)
+	hc.size_flags_horizontal = W.EXPAND_FILL
+	hc:set_alignment(W.ALIGN_CENTER)
+	hints:add_child(hv)
+	hints:add_child(hc)
+	v:add_child(hints)
+	local back = UITheme.button("Back", "GlassButton", "exit", 40.0)
+	v:add_child(back)
+	local function pick(role: string)
+		self:close_side_pick()
+		if self._public.state == "idle" and self._joining == nil then
+			self:set_public({ state = "joining", mode = "duel" })
+			self.join_public:Fire("duel", role)
+		end
+	end
+	virus.pressed:Connect(function()
+		pick("plague")
+	end)
+	cure.pressed:Connect(function()
+		pick("cure")
+	end)
+	back.pressed:Connect(function()
+		self.ctx:sfx("click")
+		self:close_side_pick()
+	end)
+	self._side:set_visible(false)
+end
+
+function TitleScreen.open_side_pick(self, l: any?)
+	self.ctx:sfx("click")
+	local where = if l ~= nil and l.map_name ~= nil then (tostring(l.map_name) .. ": ") else ""
+	self._side_sub:set_text(where .. "you'll be matched with someone who picked the other side")
+	self._side_open = true
+	self._dock:set_visible(false)
+	self._side:set_visible(true)
+	W.slide_in(self._side, Vector2.new(0, 36), 0.3, 0.5)
+end
+
+function TitleScreen.close_side_pick(self)
+	if not self._side_open then
+		return
+	end
+	self._side_open = false
+	self._side:set_visible(false)
+	self:_refresh_queue_mode()
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Layout & state
 -- ---------------------------------------------------------------------------------------------
@@ -817,6 +918,10 @@ function TitleScreen.apply_layout(self)
 	-- Keep the wordmark clear of the reserved top-left HUD: shrink it while it can stay centred,
 	-- otherwise move the whole composition into the free column on the right.
 	local col_x = vp.X * 0.5
+	-- (RoPlague, 2026-10-30: every device shows the one scaled layout, and Roblox's top-bar buttons do
+	-- not scale with it, so on a phone they cover far more of it: the composition stays centred and
+	-- the wordmark drops below them instead of the whole title moving aside)
+	local drop = 0.0
 	if not compact then
 		local min_left = ctx.reserved_top_left.Max.X + 16.0
 		-- The original's desktop always reserved Airship's chat panel (airship_reserved: 440 px wide,
@@ -843,8 +948,7 @@ function TitleScreen.apply_layout(self)
 			if fit_px >= 88.0 then
 				word_px = fit_px
 			else
-				col_x = (min_left + vp.X - 24.0) * 0.5
-				word_px = math.min(word_px, word_px * (vp.X - 24.0 - min_left) / math.max(w, 1.0))
+				drop = ctx.reserved_top_left.Max.Y + 6.0
 			end
 			self:_size_word(word_px)
 		end
@@ -856,7 +960,7 @@ function TitleScreen.apply_layout(self)
 	self._tag:set_font_size(if compact then 11 else 15)
 	self._tag_l:set_min_size(Vector2.new(if compact then 40 else 72, 2))
 	self._tag_r:set_min_size(self._tag_l.custom_minimum_size)
-	local head_top = (if compact then 56.0 else math.max(vp.Y * 0.07, 40.0)) + ctx.insets.y
+	local head_top = math.max((if compact then 56.0 else math.max(vp.Y * 0.07, 40.0)) + ctx.insets.y, drop)
 	if compact then
 		-- Phones: keep the wordmark centred, below the top bar row when they would touch.
 		local ww = self._word:get_combined_minimum_size().X
@@ -930,7 +1034,7 @@ function TitleScreen.apply_layout(self)
 	self._greet:set_visible(not compact)
 	-- (phones: room under the dock for the credits line)
 	local bottom = (if not compact then 40.0 else 20.0) + ctx.insets.w
-	for _, cn in ipairs({ self._dock, self._queue, self._solo_panel }) do
+	for _, cn in ipairs({ self._dock, self._queue, self._solo_panel, self._side }) do
 		cn.anchor_left, cn.anchor_right, cn.anchor_top, cn.anchor_bottom = 0.5, 0.5, 1.0, 1.0
 		cn.grow_horizontal = W.GROW_BOTH
 		cn.grow_vertical = W.GROW_BEGIN
@@ -957,6 +1061,7 @@ function TitleScreen._place_crate_button(self, compact: boolean, head_top: numbe
 	local ctx = self.ctx
 	local vp = ctx.vp
 	local ins = ctx.insets
+	self._col_args = { compact, head_top }
 	local b = self._crate_btn
 	b:set_scale(if compact then CrateButton.PHONE_K else 1.0)
 	local size = b:size_px()
@@ -1011,6 +1116,7 @@ function TitleScreen._place_crate_button(self, compact: boolean, head_top: numbe
 	local gtop = below + (if compact then 8.0 else 14.0)
 	gb:set_anchors(0, 0, 0, 0)
 	gb:set_offsets(right - gsz.X, gtop, right, gtop + gsz.Y)
+	self._col_shown = (if sb.visible then 1 else 0) + (if shb.visible then 2 else 0)
 end
 
 --- RoWorld General's button says whether the player is one (Session.general).
@@ -1177,6 +1283,8 @@ function TitleScreen._build_solo_menu(self)
 	v:add_child(head)
 	self._map_btn.size_flags_horizontal = W.FILL
 	v:add_child(self._map_btn)
+	self._name_btn.size_flags_horizontal = W.FILL
+	v:add_child(self._name_btn)
 	self._diff_row.size_flags_horizontal = W.FILL
 	v:add_child(self._diff_row)
 	v:add_child(self._diff_desc)
@@ -1216,15 +1324,8 @@ function TitleScreen.close_solo_menu(self, quiet: boolean?)
 end
 
 function TitleScreen._refresh_diff(self)
-	local txt = TitleScreen.DIFF_BLURB[self.difficulty]
-	local grace = self.ctx:rules_call("human_grace_ticks", { self.difficulty })
-	if type(grace) == "number" then
-		local secs = grace / 10.0
-		if secs > 0.0 then
-			txt ..= "  Nations leave you alone for " .. UITheme.fmt_time(secs) .. "."
-		end
-	end
-	self._diff_desc:set_text(txt)
+	-- (RoWorld added the nations' early peace here; a plague has no nations attacking it)
+	self._diff_desc:set_text(TitleScreen.DIFF_BLURB[self.difficulty])
 end
 
 function TitleScreen._size_word(self, px: number)
@@ -1320,8 +1421,24 @@ function TitleScreen._refresh_queue_mode(self)
 	if waiting then
 		self:close_solo_menu(true)
 	end
-	self._queue:set_visible(waiting)
-	self._dock:set_visible(not waiting and not self._solo_open)
+	-- (RoPlague's ONLINE place is only ever a match: no dock, no PLAY SOLO, only the joining panel)
+	local online = TitleScreen.is_online()
+	if online then
+		self._q_title:set_text("JOINING YOUR MATCH")
+		if not waiting then
+			self._q_status:set_text("Getting the world ready…")
+			self._q_players:set_text("")
+			self._q_vote:set_visible(false)
+		end
+	end
+	self._queue:set_visible(waiting or online)
+	self._dock:set_visible(not waiting and not online and not self._solo_open and not self._side_open)
+end
+
+--- True on RoPlague's online place (Data/Places): every server there is a match.
+function TitleScreen.is_online(): boolean
+	local Places = UICtx.data("Places")
+	return Places ~= nil and type(Places.is_online) == "function" and Places.is_online()
 end
 
 function TitleScreen._countdown(self): number
@@ -1354,7 +1471,16 @@ function TitleScreen._refresh_lobby_cards(self)
 	-- seat in that kind, and with every match of it full the player waits in line (CANCEL).
 	local soonest: { [string]: any } = {}
 	local has_team = false
+	-- (RoPlague: a mode's row says how many are searching for it: never hidden as "full")
+	for _, lb in self._lobbies or {} do
+		if lb.plague == true and type(lb.mode) == "string" then
+			soonest[lb.mode] = lb
+		end
+	end
 	for _, lb in open do
+		if lb.plague == true then
+			continue
+		end
 		local k = if lb.mode == "team" or lb.mode == "world" then lb.mode else "ffa"
 		soonest[k] = soonest[k] or lb
 		has_team = has_team or k == "team"
@@ -1386,9 +1512,79 @@ function TitleScreen._refresh_lobby_cards(self)
 	end
 end
 
+--- RoPlague's multiplayer modes (Data/PlagueModes): the title's cards (server/PlagueMatch matchmakes).
+local PLAGUE_CARDS = {
+	duel = { title = "1V1", sub = "Plague vs Cure", short = "1v1", icon = "cure" },
+	race = { title = "PLAGUE RACE", sub = "Free for all: spread, attack", short = "Race", icon = "virus" },
+	teams = { title = "TEAM PLAGUE", sub = "One plague a team: spread, attack", short = "Teams", icon = "users" },
+}
+TitleScreen.PLAGUE_CARDS = PLAGUE_CARDS
+
+--- A mode's card: what it is, how many are searching, or where our ask is (searching, found).
+function TitleScreen._refresh_plague_card(self, card: { [string]: any }, kind: string, l: any?)
+	local ctx = self.ctx
+	local pc = PLAGUE_CARDS[kind]
+	local pub = self._public
+	local mine = pub.state ~= "idle" and pub.mode == kind
+	local busy_other = pub.state ~= "idle" and not mine
+	local follower = self._in_party and not self._party_leader
+	-- the rotation's map (its thumbnail, as RoWorld's lobby cards show theirs) and a team game's format
+	local map = if l ~= nil and type(l.map) == "string" then l.map else nil
+	local e = if map ~= nil then UIMaps.get(map) else nil
+	if e ~= nil and e.thumb ~= nil and not self._tight then
+		card.icon:set_visible(false)
+		card.thumb_node:set_visible(true)
+		card.thumb.Image = e.thumb
+	else
+		card.icon:set_visible(true)
+		card.icon:set_icon(pc.icon)
+		card.thumb_node:set_visible(false)
+	end
+	card.title:set_text(pc.title)
+	local where = if l ~= nil and l.map_name ~= nil then tostring(l.map_name) else nil
+	if where ~= nil and l.format ~= nil then
+		where ..= "  ·  " .. tostring(l.format)
+	end
+	local idle_text = if where ~= nil then (if ctx.compact then where else where .. "  ·  " .. pc.sub) else pc.sub
+	local short_text = if where ~= nil then where else pc.short
+	local searching = if l ~= nil then tonumber(l.players) or 0 else 0
+	local text
+	if mine and pub.state == "line" then
+		local w = UITheme.fmt_time(math.max(0, math.floor((UICtx.msec() - self._public_since) / 1000)))
+		text = if ctx.compact then ("Searching  ·  " .. w) else ("Finding players  ·  " .. w)
+	elseif mine and pub.state == "going" then
+		text = "Match found! Joining…"
+	elseif mine then
+		text = "Finding players…"
+	elseif searching > 0 then
+		text = string.format("%s  ·  %d searching", short_text, searching)
+	else
+		text = if ctx.compact then short_text else idle_text
+	end
+	if self._tight and mine and pub.state == "line" then
+		text = "Searching  ·  tap to cancel"
+	end
+	card.status:set_text(text)
+	UITheme.set_swatch_color(card.dot, if mine or searching > 0 then UITheme.GREEN else UITheme.CYAN)
+	card.pill:set_visible(not self._tight)
+	card.pill_l:set_text(
+		if follower
+			then "LEADER"
+			elseif mine and pub.state == "line" then "CANCEL"
+			elseif mine then "…"
+			else "PLAY"
+	)
+	local ready = not follower and not busy_other and (pub.state == "idle" or (mine and pub.state == "line"))
+	card.btn:set_disabled(not ready or self._joining ~= nil)
+end
+
 --- One Quick Play card: the kind's soonest lobby with room (`l`, nil: none listed — JOIN still puts
 --- the player in line), or what the player's ask is doing.
 function TitleScreen._refresh_kind_card(self, card: { [string]: any }, kind: string, l: any?, elapsed: number)
+	if PLAGUE_CARDS[kind] ~= nil then
+		self:_refresh_plague_card(card, kind, l)
+		return
+	end
 	local ctx = self.ctx
 	local pub = self._public
 	local mine = pub.state ~= "idle" and pub.mode == kind
@@ -1641,6 +1837,13 @@ end
 function TitleScreen._process(self, delta: number)
 	if not self.visible then
 		return
+	end
+	-- the right-hand column stacks on what is shown: the starter pack's and the flag shop's buttons come
+	-- and go after the layout ran (the offer loads late), so a change re-places the column (before,
+	-- the General card was left on top of a starter button that showed up later)
+	local shown = (if self._starter_btn.visible then 1 else 0) + (if self._shop_btn.visible then 2 else 0)
+	if self._col_shown ~= shown and self._col_args ~= nil then
+		self:_place_crate_button(self._col_args[1], self._col_args[2])
 	end
 	if self._sweep_t >= 0.0 then
 		self._sweep_t += delta

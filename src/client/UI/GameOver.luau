@@ -105,6 +105,18 @@ function GameOver.new(c: any)
 	wr:add_child(self._crown)
 	self._winner_sw = UITheme.swatch(UITheme.TEXT, 12.0, 3)
 	wr:add_child(self._winner_sw)
+	-- RoPlague: the flag of the country the pill names (the one researching the cure hardest)
+	local pflag = Instance.new("ImageLabel")
+	pflag.BackgroundTransparency = 1
+	pflag.ScaleType = Enum.ScaleType.Fit
+	self._pill_flag_img = pflag
+	self._pill_flag = W.wrap(pflag)
+	self._pill_flag:set_mouse_filter(W.MOUSE_IGNORE)
+	self._pill_flag:_part(pflag, "ImageTransparency", 1.0)
+	self._pill_flag:set_min_size(Vector2.new(27, 18))
+	self._pill_flag.size_flags_vertical = W.SHRINK_CENTER
+	self._pill_flag:set_visible(false)
+	wr:add_child(self._pill_flag)
 	self._winner_name = UITheme.label("", 15, 700)
 	wr:add_child(self._winner_name)
 	self._winner:add_child(wr)
@@ -470,6 +482,48 @@ function GameOver._stat_card(self, icon_name: string, value: string, caption: st
 	return card
 end
 
+--- RoPlague: a count of people (12.3K, 4.5M, 7.66B; Plague/PUI.people's shape).
+local function people(n: number): string
+	n = math.max(0, math.floor((tonumber(n) or 0) + 0.5))
+	if n >= 1e9 then
+		return string.format("%.2fB", n / 1e9)
+	elseif n >= 1e6 then
+		return string.format("%.1fM", n / 1e6)
+	elseif n >= 1e3 then
+		return string.format("%.1fK", n / 1e3)
+	end
+	return tostring(n)
+end
+
+--- RoPlague's end cards: people killed, the most infected at once, countries reached, evolutions, time.
+function GameOver._plague_cards(self, s: any, pl: any, secs: number): { any }
+	local reached, total = 0, 0
+	for id, o in s.owners do
+		if id > 0 and o.kind == Defs.KIND_NATION then
+			total += 1
+			local row = pl.countries[id]
+			if row ~= nil and (tonumber(row.I) or 0) + (tonumber(row.D) or 0) >= 1 then
+				reached += 1
+			end
+		end
+	end
+	local evos = 0
+	for _, on in pl.owned or {} do
+		if on then
+			evos += 1
+		end
+	end
+	local peak = math.max(tonumber(pl.peak) or 0, tonumber(pl.I) or 0)
+	local cards = {
+		self:_stat_card("death", people(tonumber(pl.D) or 0), "People killed", UITheme.RED),
+		self:_stat_card("infect", people(peak), "Most infected", UITheme.AMBER),
+		self:_stat_card("world", ("%d/%d"):format(reached, total), "Countries reached", UITheme.CYAN),
+		self:_stat_card("evolve", tostring(evos), "Evolutions", UITheme.GREEN),
+		self:_stat_card("clock", UITheme.fmt_time(secs), "Match duration", UITheme.VIOLET),
+	}
+	return cards
+end
+
 --- kind: "victory", "defeat", "eliminated" or "result" (the match ended while you were not in it).
 --- reason: Defs.OVER_* (ignored for "eliminated"). stats: {peak_share, max_troops, kills, duration_s}
 function GameOver.open(self, kind: string, winner: number, killer: number, stats: any, reason: number?)
@@ -528,32 +582,41 @@ function GameOver.open(self, kind: string, winner: number, killer: number, stats
 		sl.card = card
 		return sl
 	end
-	self._stats:add_child(
-		slot(self:_stat_card("globe", UITheme.fmt_pct(tonumber(stats.peak_share) or 0.0), "Peak land", UITheme.AMBER))
-	)
-	self._stats:add_child(
-		slot(self:_stat_card("troops", UITheme.fmt_troops(tonumber(stats.max_troops) or 0), "Max troops", UITheme.CYAN))
-	)
-	self._stats:add_child(
-		slot(
-			self:_stat_card(
-				"skull",
-				tostring(math.floor(tonumber(stats.kills) or 0)),
-				"Nations eliminated",
-				UITheme.RED
+	local pl = if s ~= nil then s.plague else nil
+	if pl ~= nil then
+		-- RoPlague: what the plague did (land and troops mean nothing to a plague)
+		for _, card in self:_plague_cards(s, pl, UIRules.result_seconds(kind, stats)) do
+			self._stats:add_child(slot(card))
+		end
+	else
+		self._stats:add_child(
+			slot(self:_stat_card("globe", UITheme.fmt_pct(tonumber(stats.peak_share) or 0.0), "Peak land", UITheme.AMBER))
+		)
+		self._stats:add_child(
+			slot(self:_stat_card("troops", UITheme.fmt_troops(tonumber(stats.max_troops) or 0), "Max troops", UITheme.CYAN))
+		)
+		self._stats:add_child(
+			slot(
+				self:_stat_card(
+					"skull",
+					tostring(math.floor(tonumber(stats.kills) or 0)),
+					"Nations eliminated",
+					UITheme.RED
+				)
 			)
 		)
-	)
-	-- The match's length: a result reached after an elimination still reports the whole match
-	-- (stats.match_s), not the moment the player fell (review R2-6).
-	local secs = UIRules.result_seconds(kind, stats)
-	self._stats:add_child(slot(self:_stat_card("clock", UITheme.fmt_time(secs), "Match duration", UITheme.VIOLET)))
+		-- The match's length: a result reached after an elimination still reports the whole match
+		-- (stats.match_s), not the moment the player fell (review R2-6).
+		local secs = UIRules.result_seconds(kind, stats)
+		self._stats:add_child(slot(self:_stat_card("clock", UITheme.fmt_time(secs), "Match duration", UITheme.VIOLET)))
+	end
 	local solo = ctx:mode() == UICtx.MODE_SOLO
 	local running = s ~= nil and s.phase == Defs.PHASE_PLAYING
 	-- the Stars this match (or this life) paid, if the payout is in already
 	local sess = ctx.session
 	self:set_award(if sess ~= nil then sess.last_award else nil)
-	self._again:set_visible(solo)
+	-- (RoPlague: a Plague Race is played once; back to the lobby for the next)
+	self._again:set_visible(solo and (sess == nil or sess.race == nil))
 	self._spec:set_visible(kind == "eliminated" and running)
 	self._spec:set_text("Keep watching")
 	self._home:set_text("Return to title")
@@ -623,7 +686,7 @@ local function flag_named(name: string): any
 			return (require :: any)("../../shared/Data/Cosmetics")
 		end)
 		if ok and type(Cosmetics) == "table" then
-			for _, it in Cosmetics.all() do
+			for _, it in Cosmetics.world() do
 				if it.kind == "flag" then
 					local e = { item = it, image = Cosmetics.flag_image(it) }
 					m[string.lower(it.name)] = e
@@ -768,6 +831,11 @@ end
 --- Only touches the label when the text changes (called on every live refresh).
 function GameOver._set_pill(self, id: number)
 	local s = self.ctx.state
+	if s ~= nil and s.plague ~= nil then
+		-- RoPlague: land means nothing to a plague: the pill names the country putting the most into the cure
+		self:_set_cure_pill(s)
+		return
+	end
 	local wo = if s ~= nil and id ~= 0 then s:get_owner(id) else nil
 	local show = wo ~= nil and self._kind ~= "victory"
 	self._pill_wanted = show
@@ -780,6 +848,8 @@ function GameOver._set_pill(self, id: number)
 		self._pill_id = id
 		return
 	end
+	self._pill_flag:set_visible(false)
+	self._winner_sw:set_visible(true)
 	local share = if self._pill_domination then self:_win_share(id) else s:land_share(id)
 	local prefix = if self._pill_live then "Current leader  ·  " else ""
 	local text = string.format("%s%s  ·  %s", prefix, wo.name, UITheme.fmt_pct(share))
@@ -787,6 +857,49 @@ function GameOver._set_pill(self, id: number)
 		UITheme.set_swatch_color(self._winner_sw, wo.color)
 	end
 	self._pill_id = id
+	if text ~= self._pill_text then
+		self._pill_text = text
+		self._winner_name:set_text(text)
+	end
+end
+
+--- RoPlague's pill: "Most research · <country> · <funding>%", the country funding the cure hardest (a
+--- collapsed one funds nothing); hidden on VICTORY and while nobody researches.
+function GameOver._set_cure_pill(self, s: any)
+	local best, best_f = 0, 0
+	for c, row in s.plague.countries do
+		local f = tonumber(row.funding) or 0
+		if f > best_f and bit32.band(tonumber(row.closed) or 0, 16) == 0 then
+			best, best_f = c, f
+		end
+	end
+	local wo = if best ~= 0 then s:get_owner(best) else nil
+	local show = wo ~= nil and self._kind ~= "victory"
+	self._pill_wanted = show
+	local vis = show and self._pill_room ~= false
+	if vis ~= self._winner.visible then
+		self._winner:set_visible(vis)
+	end
+	if wo == nil then
+		self._pill_id = 0
+		return
+	end
+	local text = string.format("Most Research: %s  ·  %d%% funded", wo.name, math.floor(best_f + 0.5))
+	if best ~= self._pill_id then
+		-- its flag (by name, the shop's flags), else a cure-blue swatch
+		local fl = flag_named(wo.name)
+		self._pill_flag:set_visible(fl ~= nil)
+		self._winner_sw:set_visible(fl == nil)
+		if fl ~= nil then
+			local img = self._pill_flag_img
+			img.Image = fl.image
+			img.ImageRectOffset = Vector2.new(fl.item.x, fl.item.y)
+			img.ImageRectSize = Vector2.new(fl.item.w, fl.item.h)
+		else
+			UITheme.set_swatch_color(self._winner_sw, UITheme.CYAN)
+		end
+	end
+	self._pill_id = best
 	if text ~= self._pill_text then
 		self._pill_text = text
 		self._winner_name:set_text(text)
@@ -870,8 +983,94 @@ function GameOver._copy(self, kind: string, winner: number, killer: number, reas
 		end
 		return c
 	end
+	-- RoPlague multiplayer: a 1v1's cure side wins what the plague loses
+	local plg = if s ~= nil then s.plague else nil
+	local cure_side = plg ~= nil and (plg.cure_pid or 0) ~= 0 and s.local_owner == plg.cure_pid
+	if cure_side then
+		if reason == Defs.OVER_CURED or reason == Defs.OVER_BURNOUT then
+			c.kicker = "THE WORLD IS SAFE"
+			c.title = "VICTORY"
+			c.top = gold_top
+			c.bottom = UITheme.GOLD
+			c.sub = if reason == Defs.OVER_CURED
+				then "You finished the cure before the plague could wipe out humanity."
+				else "The plague burned out before it could reach the rest of the world."
+			return c
+		elseif reason == Defs.OVER_EXTINCT then
+			c.kicker = "HUMANITY IS GONE"
+			c.title = "DEFEAT"
+			c.top = red_top
+			c.bottom = UITheme.RED
+			c.sub = string.format("%s wiped out the world before the cure was ready.", tostring(plg.name or "The plague"))
+			return c
+		end
+	end
+	-- RoPlague's shared world (Plague Race, teams): plagues against each other
+	if plg ~= nil and s:shared_world() then
+		local won = winner ~= 0 and winner == plg.pid
+		local wrow = if winner ~= 0 then s:plague_row(winner) else nil
+		local wn = if wrow ~= nil then tostring(wrow.name) else "Nobody"
+		local team = plg.mode == "teams"
+		if won then
+			c.title = "VICTORY"
+			c.top = gold_top
+			c.bottom = UITheme.GOLD
+		else
+			c.title = if reason == Defs.OVER_CURED or reason == Defs.OVER_BURNOUT then "GAME OVER" else "DEFEAT"
+			c.top = red_top
+			c.bottom = UITheme.RED
+		end
+		if reason == Defs.OVER_LAST then
+			c.kicker = "LAST PLAGUE STANDING"
+			c.sub = if won
+				then (if team then "Your team's plague outlasted every other one." else "Your plague outlasted every other one.")
+				else string.format("%s was the last plague standing.", wn)
+		elseif reason == Defs.OVER_EXTINCT then
+			c.kicker = "HUMANITY IS GONE"
+			c.sub = if won
+				then "Humanity is gone, and your plague killed the most."
+				else string.format("Humanity is gone. %s killed the most.", wn)
+		elseif reason == Defs.OVER_CURED then
+			c.kicker = "THE WORLD FOUGHT BACK"
+			c.sub = "Scientists finished the cure before any plague could win."
+		else
+			c.kicker = "EVERY PLAGUE BURNED OUT"
+			c.sub = "Every plague died out."
+		end
+		return c
+	end
+	-- RoPlague: the world finished the cure first (Core/SimPlague)
+	if reason == Defs.OVER_CURED then
+		c.kicker = "THE WORLD FOUGHT BACK"
+		c.title = "CURED"
+		c.top = red_top
+		c.bottom = UITheme.CYAN
+		c.sub = "Scientists finished the cure before your plague could infect the world."
+		return c
+	end
+	local pl = if s ~= nil then s.plague else nil
+	if reason == Defs.OVER_EXTINCT then
+		c.kicker = "HUMANITY IS GONE"
+		c.title = "VICTORY"
+		c.top = gold_top
+		c.bottom = UITheme.GOLD
+		c.sub = string.format(
+			"%s wiped out the world in %s.",
+			if pl ~= nil then tostring(pl.name or "Your plague") else "Your plague",
+			UITheme.fmt_time(secs)
+		)
+		return c
+	end
+	if reason == Defs.OVER_BURNOUT then
+		c.kicker = "THE PLAGUE BURNED OUT"
+		c.title = "DIED OUT"
+		c.top = red_top
+		c.bottom = UITheme.RED
+		c.sub = "Every host died or recovered before your plague reached the rest of the world. Spread first, then kill."
+		return c
+	end
 	if kind == "eliminated" then
-		c.kicker = "YOUR NATION HAS FALLEN"
+		c.kicker = "YOUR PLAGUE WAS WIPED OUT"
 		c.title = "ELIMINATED"
 		c.top = red_top
 		c.bottom = UITheme.RED
@@ -887,7 +1086,7 @@ function GameOver._copy(self, kind: string, winner: number, killer: number, reas
 			c.sub = string.format("Time! You hold the most land with %s.", wshare)
 		else
 			c.sub = string.format(
-				"You conquered the world with %s.",
+				"You infected the world with %s.",
 				if s ~= nil and winner ~= 0 then self:_win_phrase(winner, " of all land") else wshare
 			)
 		end

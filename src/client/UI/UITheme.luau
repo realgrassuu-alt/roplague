@@ -1305,16 +1305,15 @@ end
 UITheme.DESIGN_W = 1600
 UITheme.DESIGN_H = 900
 
---- UI scale for a viewport (render px). The original laid the HUD out in logical px on a 1600x900
---- design (Airship desktop); desktop screens scale that design to fit (1920x1080 -> 1.2,
---- 1366x768 -> 0.853, clamped to [0.75, 2.5]). Touch devices (phones / tablets) keep 1:1 points
---- like the original (so the phone layout rules apply) and only scale up on very large screens.
-function UITheme.ui_scale(viewport: Vector2, touch_device: boolean?): number
+--- UI scale for a viewport (render px). The HUD is laid out in logical px on a 1600x900 design and
+--- every device scales that one design to fit (1920x1080 -> 1.2, 1366x768 -> 0.853, a phone's
+--- 844x390 -> 0.433, a TV the same as a desktop). RoPlague, 2026-10-30: phones used to keep 1:1 points
+--- and switch to RoWorld's compact phone layout; now every device shows the same layout, only
+--- scaled (the smaller ratio wins, so the logical screen is never smaller than the design and the
+--- compact rules never trigger).
+function UITheme.ui_scale(viewport: Vector2, _touch_device: boolean?): number
 	local s = math.min(viewport.X / UITheme.DESIGN_W, viewport.Y / UITheme.DESIGN_H)
-	if touch_device then
-		return math.clamp(s, 1.0, 2.0)
-	end
-	return math.clamp(s, 0.75, 2.5)
+	return math.clamp(s, 0.3, 2.5)
 end
 
 function UITheme.set_scale(s: number)
@@ -1398,6 +1397,20 @@ function UITheme.icon(icon_name: string): string?
 			if ok3 and type(s) == "table" and type(s.ui) == "table" then
 				for k, v in s.ui do
 					_icons[k] = v
+				end
+			end
+			-- RoPlague's own glyphs (Assets/PlagueIcons: virus, dna, evolve, cure, pencil...)
+			local ok4, pi = pcall(function()
+				local rs = game:GetService("ReplicatedStorage")
+				local assets = (rs:WaitForChild("Airfront") :: any):FindFirstChild("Assets")
+				local mod = assets and assets:FindFirstChild("PlagueIcons")
+				return if mod then require(mod) :: any else nil
+			end)
+			if ok4 and type(pi) == "table" then
+				for k, v in pi do
+					if type(v) == "string" and v ~= "" then
+						_icons[k] = v
+					end
 				end
 			end
 		else

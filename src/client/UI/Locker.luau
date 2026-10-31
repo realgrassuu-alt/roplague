@@ -13,6 +13,10 @@
 --   reveal      after a crate opens: the item in its rarity's colour, Equip / Open another / Done.
 -- The purchase goes like the takeover's (Takeover.luau): Roblox's prompt, the server stores the crate
 -- (server/Purchases), the client opens it (Session.open_crate), the server rolls it.
+-- RoPlague (2026-10-29): crates hold INFECTION COLOURS (Data/Cosmetics, Data/Strains). The first tab,
+-- COLOURS, lists every colour, the colour shop's and the crates', and the one you press is what your
+-- plague wears ("Crimson", the free default, is the "None" card); a locked one says where it comes from
+-- (COLOUR SHOP / IN A CRATE). RoWorld's Skins and Flags tabs show only while the player owns some.
 -- Signals: closed.
 local UITheme = require("./UITheme")
 local W = require("./Widgets")
@@ -41,9 +45,22 @@ local SkinPreviews: any = (function()
 	return if ok and type(m) == "table" then m else {}
 end)()
 
+--- RoPlague: a colour's card carries the plague's virus glyph on the colour (Assets/PlagueIcons)
+local VIRUS_ICON: string = (function()
+	local ok, m = pcall(function()
+		if IS_ROBLOX then
+			return require((game :: any):GetService("ReplicatedStorage"):WaitForChild("Airfront").Assets.PlagueIcons)
+		end
+		return (require :: any)("../../shared/Assets/PlagueIcons")
+	end)
+	return if ok and type(m) == "table" then (m.virus or "") else ""
+end)()
+local Strains = shared("Strains")
+
 local Locker = W.class(W.Control)
 
-Locker.TABS = { { "Skins", "skin" }, { "Flags", "flag" } }
+--- (a tab shows when its slot is "color", or the player owns something for it)
+Locker.TABS = { { "Colours", "color" }, { "Skins", "skin" }, { "Flags", "flag" } }
 Locker.SKIN_CARD = Vector2.new(116, 128)
 Locker.FLAG_CARD = Vector2.new(104, 96)
 Locker.GRID_SIZE = Vector2.new(560, 430)
@@ -122,13 +139,78 @@ local function skin_preview(skin: any): any
 	return if wrote then img else nil
 end
 
---- Show item `it` in ImageLabel `img` (a skin's preview or a flag from its atlas).
+--- A colour item's tile inside ImageLabel `img`: a square of its colours (Cosmetics.swatch) with the
+--- virus glyph on it; hidden for any other item. Returns the tile and its glyph (nil when hidden).
+local function color_tile(img: ImageLabel, it: any): (Frame?, ImageLabel?)
+	local tile = img:FindFirstChild("ColorTile") :: Frame?
+	if it == nil or it.kind ~= "color" then
+		if tile ~= nil then
+			tile.Visible = false
+		end
+		return nil, nil
+	end
+	if tile == nil then
+		local f = Instance.new("Frame")
+		f.Name = "ColorTile"
+		f.AnchorPoint = Vector2.new(0.5, 0.5)
+		f.Position = UDim2.fromScale(0.5, 0.5)
+		f.Size = UDim2.fromScale(1, 1)
+		f.BorderSizePixel = 0
+		f.ZIndex = img.ZIndex
+		local ar = Instance.new("UIAspectRatioConstraint")
+		ar.AspectRatio = 1
+		ar.Parent = f
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0.22, 0)
+		c.Parent = f
+		local st = Instance.new("UIStroke")
+		st.Color = Color3.new(1, 1, 1)
+		st.Transparency = 0.55
+		st.Thickness = 2
+		st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		st.Parent = f
+		local g = Instance.new("ImageLabel")
+		g.Name = "Glyph"
+		g.BackgroundTransparency = 1
+		g.AnchorPoint = Vector2.new(0.5, 0.5)
+		g.Position = UDim2.fromScale(0.5, 0.5)
+		g.Size = UDim2.fromScale(0.62, 0.62)
+		g.Image = VIRUS_ICON
+		g.ImageColor3 = Color3.new(1, 1, 1)
+		g.ImageTransparency = 0.08
+		g.ZIndex = img.ZIndex + 1
+		g.Parent = f
+		f.Parent = img
+		tile = f
+	end
+	local t = tile :: Frame
+	t.Visible = true
+	t.BackgroundTransparency = 0
+	Cosmetics.swatch(it, t)
+	return t, t:FindFirstChild("Glyph") :: ImageLabel
+end
+Locker.color_tile = color_tile
+
+--- The free default colour (Strains.DEFAULT) as a colour item: the COLOURS tab's "None" card.
+local DEFAULT_COLOR = (function()
+	local st = Strains.get(Strains.DEFAULT)
+	return {
+		id = "",
+		kind = "color",
+		key = Strains.DEFAULT,
+		name = if st then st.name else "Crimson",
+		rarity = "common",
+	}
+end)()
+
+--- Show item `it` in ImageLabel `img` (a skin's preview, a flag from its atlas, or a colour's tile).
 local function show_item(img: ImageLabel, it: any)
 	img.ImageRectOffset = Vector2.zero
 	img.ImageRectSize = Vector2.zero
 	img.ImageContent = Content.none
 	img.Image = ""
-	if it == nil then
+	color_tile(img, it)
+	if it == nil or it.kind == "color" then
 		return
 	end
 	if it.kind == "flag" then
@@ -240,6 +322,7 @@ function Locker.new(c: any)
 		tabs:add_child(chip)
 	end
 	right:add_child(tabs)
+	self._tab_strip = tabs
 	local host = W.Control.new()
 	host:set_min_size(Locker.GRID_SIZE)
 	host:set_mouse_filter(W.MOUSE_PASS)
@@ -268,7 +351,7 @@ function Locker.new(c: any)
 	pad.PaddingTop = UDim.new(0, 2)
 	pad.PaddingLeft = UDim.new(0, 2)
 	pad.Parent = sf
-	self._foot = UITheme.label("Flags: Wikimedia Commons (public domain)", 11, 500, UITheme.TEXT_3)
+	self._foot = UITheme.label("The colour you wear paints your plague on the map.", 11, 500, UITheme.TEXT_3)
 	v:add_child(self._foot)
 	-- Roblox: the purchase prompt (the session's signals: bind, once UIRoot has one)
 	if IS_ROBLOX then
@@ -334,7 +417,7 @@ function Locker._build_crate(self, parent: any)
 	self._crate_title = UITheme.label("COSMETIC CRATE", 16, 800, UITheme.TEXT, 2)
 	self._crate_title:set_alignment(W.ALIGN_CENTER)
 	v:add_child(self._crate_title)
-	self._crate_sub = UITheme.label("A territory skin or a flag you don't own yet", 12, 500, UITheme.TEXT_2)
+	self._crate_sub = UITheme.label("An infection colour you don't own yet", 12, 500, UITheme.TEXT_2)
 	self._crate_sub:set_alignment(W.ALIGN_CENTER)
 	self._crate_sub:set_autowrap(true)
 	self._crate_sub:set_min_size(Vector2.new(Locker.CRATE_W - 32, 0))
@@ -481,7 +564,7 @@ function Locker._refresh_crate(self)
 	if not allowed then
 		self._note:set_text("Crates aren't available in your country. What you own stays yours.")
 	elseif all_owned then
-		self._note:set_text("You own every skin and flag.")
+		self._note:set_text("You own every crate colour.")
 	elseif waiting <= 0 and prod == Products.crate_first then
 		self._note:set_text(string.format("Your first crate: %d instead of %d", self:_price(), Prices.robux("crate")))
 	elseif save ~= nil then
@@ -525,7 +608,9 @@ function Locker._buy_pressed(self, pack: any?)
 	if prod == nil or prod.id == 0 or not IS_ROBLOX then
 		return
 	end
-	self._pending = { phase = "prompt", product = prod.id, since = os.clock() }
+	-- (`had`: the crates waiting before it; one more arriving means it was bought, whether or not
+	-- Roblox's prompt-closed event comes: it is deprecated and Studio's new purchase sheet never fires it)
+	self._pending = { phase = "prompt", product = prod.id, since = os.clock(), had = self:_crates() }
 	self:_refresh_crate()
 	local ok = pcall(function()
 		game:GetService("MarketplaceService"):PromptProductPurchase(game:GetService("Players").LocalPlayer, prod.id)
@@ -623,7 +708,9 @@ end
 
 function Locker._on_credits(self)
 	local p = self._pending
-	if p ~= nil and p.phase == "credit" and self:_crates() > 0 then
+	local bought = p ~= nil
+		and (p.phase == "credit" and self:_crates() > 0 or p.phase == "prompt" and self:_crates() > (p.had or 0))
+	if bought then
 		self:_open()
 	end
 	if self.is_open then
@@ -653,7 +740,7 @@ function Locker._on_result(self, ok: boolean, res: string)
 		local it = Cosmetics.item(res)
 		if it ~= nil then
 			-- the grid behind shows the new item's tab
-			self._tab = if it.kind == "flag" then 2 else 1
+			self._tab = if it.kind == "flag" then 3 elseif it.kind == "skin" then 2 else 1
 			for j, ch in ipairs(self._tabs) do
 				ch:set_pressed_no_signal(j == self._tab)
 			end
@@ -664,7 +751,7 @@ function Locker._on_result(self, ok: boolean, res: string)
 	elseif o ~= nil then
 		o:fail(
 			if res == "everything owned"
-				then "You own every skin and flag already."
+				then "You own every crate colour already."
 				else "Couldn't open the crate right now. It's saved: try again."
 		)
 	end
@@ -676,7 +763,12 @@ function Locker.tick(self)
 	if p ~= nil then
 		local limit = if p.phase == "prompt" then 180 else Locker.CREDIT_WAIT_S
 		if os.clock() - p.since > limit then
-			self:_cancel(if p.phase == "prompt" then nil else "Your crate is saved: open it in a moment.")
+			self:_cancel(
+				if p.phase == "prompt"
+					then nil
+					elseif self:_crates() > 0 then "Your crate is ready: press OPEN CRATE."
+					else "Your crate is saved: it opens as soon as it arrives."
+			)
 		end
 	end
 end
@@ -696,6 +788,8 @@ function Locker._card(self, it: any, order: number, slot: string): TextButton
 	local owned = it == nil or inv.owned[it.id] == true
 	local equipped = if it == nil then self:_equipped(slot) == nil else self:_equipped(slot) == it.id
 	local rar = if it ~= nil then Cosmetics.rarity(it.rarity) else nil
+	-- (the COLOURS tab's "None" is the free default colour)
+	local shown = if it == nil and slot == "color" then DEFAULT_COLOR else it
 	local b = Instance.new("TextButton")
 	b.Name = if it then it.id else "none"
 	b.Text = ""
@@ -721,14 +815,15 @@ function Locker._card(self, it: any, order: number, slot: string): TextButton
 	img.Size = UDim2.new(1, -math.floor(20 * s), 1, -math.floor(46 * s))
 	img.ZIndex = 42
 	img.Parent = b
-	show_item(img, it)
+	show_item(img, shown)
+	local tile, glyph = color_tile(img, shown)
 	local name = Instance.new("TextLabel")
 	name.BackgroundTransparency = 1
 	name.FontFace = FONT
 	name.TextSize = math.floor(12 * s)
 	name.TextColor3 = Color3.new(1, 1, 1)
 	name.TextTruncate = Enum.TextTruncate.AtEnd
-	name.Text = if it then it.name else "None"
+	name.Text = if shown then shown.name else "None"
 	name.Position = UDim2.new(0, math.floor(8 * s), 1, -math.floor(34 * s))
 	name.Size = UDim2.new(1, -math.floor(16 * s), 0, math.floor(16 * s))
 	name.ZIndex = 42
@@ -741,7 +836,19 @@ function Locker._card(self, it: any, order: number, slot: string): TextButton
 		then UITheme.color3(UITheme.to_rgba(UITheme.AMBER))
 		elseif rar and owned then c3(rar.color)
 		else Color3.fromRGB(150, 158, 180)
-	sub.Text = if equipped then "WEARING" elseif not owned then "LOCKED" elseif rar then string.upper(rar.name) else ""
+	-- (a colour not owned says where it comes from)
+	local from = if it == nil or owned
+		then nil
+		elseif it.shop then "COLOUR SHOP"
+		elseif it.crate_color then "IN A CRATE"
+		else nil
+	sub.Text = if equipped
+		then "WEARING"
+		elseif from ~= nil then from
+		elseif not owned then "LOCKED"
+		elseif it == nil and slot == "color" then "FREE"
+		elseif rar then string.upper(rar.name)
+		else ""
 	sub.Position = UDim2.new(0, math.floor(8 * s), 1, -math.floor(18 * s))
 	sub.Size = UDim2.new(1, -math.floor(16 * s), 0, math.floor(12 * s))
 	sub.ZIndex = 42
@@ -750,6 +857,16 @@ function Locker._card(self, it: any, order: number, slot: string): TextButton
 	host:_part(b, "BackgroundTransparency", 0.06)
 	host:_part(stroke, "Transparency", 1 - stroke.Transparency)
 	host:_part(img, "ImageTransparency", if owned then 1.0 else 0.3)
+	if tile ~= nil then
+		host:_part(tile, "BackgroundTransparency", if owned then 1.0 else 0.35)
+		if glyph ~= nil then
+			host:_part(glyph, "ImageTransparency", if owned then 0.92 else 0.3)
+		end
+		local st = tile:FindFirstChildOfClass("UIStroke")
+		if st ~= nil then
+			host:_part(st, "Transparency", if owned then 0.45 else 0.15)
+		end
+	end
 	host:_part(name, "TextTransparency", if owned then 1.0 else 0.45)
 	host:_part(sub, "TextTransparency", 1.0)
 	b.MouseEnter:Connect(function()
@@ -761,6 +878,11 @@ function Locker._card(self, it: any, order: number, slot: string): TextButton
 	b.Activated:Connect(function()
 		if not owned then
 			self.ctx:sfx("deny", -6.0)
+			if it ~= nil and it.shop then
+				self:_toast(("%s is sold in the Colour Shop"):format(it.name))
+			elseif it ~= nil and it.crate_color then
+				self:_toast(("%s comes from a crate"):format(it.name))
+			end
 			return
 		end
 		local se = self.ctx.session
@@ -783,19 +905,27 @@ function Locker._rebuild(self)
 	end
 	table.clear(self._cards)
 	local s = UITheme.scale
+	self:_refresh_tabs()
 	local slot = Locker.TABS[self._tab][2]
-	local cell = if slot == "skin" then Locker.SKIN_CARD else Locker.FLAG_CARD
+	local cell = if slot == "flag" then Locker.FLAG_CARD else Locker.SKIN_CARD
 	if self.ctx.compact then
 		cell *= 0.82
 	end
 	self._grid.CellSize = UDim2.fromOffset(math.floor(cell.X * s), math.floor(cell.Y * s))
 	self._grid.CellPadding = UDim2.fromOffset(math.floor(8 * s), math.floor(8 * s))
 	local inv = self:_inv()
-	-- None first, then owned (by rarity, rarest first), then the rest
+	-- None first, then owned (by rarity, rarest first), then the rest. Colours: every one (the
+	-- shop's and the crates'); skins and flags: only what the player still owns (no crate gives them)
 	local list = {}
-	for _, it in Cosmetics.all() do
-		if it.kind == slot then
+	if slot == "color" then
+		for _, it in Cosmetics.colors() do
 			table.insert(list, it)
+		end
+	else
+		for _, it in Cosmetics.world() do
+			if it.kind == slot and inv.owned[it.id] == true then
+				table.insert(list, it)
+			end
 		end
 	end
 	-- (an exclusive only for whoever owns it: nobody else can get one; a shop flag once bought, the
@@ -807,11 +937,6 @@ function Locker._rebuild(self)
 	end
 	-- (a General skin once given: Data/Subscription)
 	for _, it in Cosmetics.generals() do
-		if it.kind == slot and inv.owned[it.id] == true then
-			table.insert(list, it)
-		end
-	end
-	for _, it in Cosmetics.shop_items() do
 		if it.kind == slot and inv.owned[it.id] == true then
 			table.insert(list, it)
 		end
@@ -831,6 +956,44 @@ function Locker._rebuild(self)
 	table.insert(self._cards, self:_card(nil, 0, slot))
 	for i, it in list do
 		table.insert(self._cards, self:_card(it, i, slot))
+	end
+end
+
+--- Which tabs show: COLOURS always; Skins / Flags while the player owns or wears one. A tab whose
+--- chip goes away gives way to COLOURS. With one tab only, the strip hides.
+function Locker._refresh_tabs(self)
+	local inv = self:_inv()
+	local has = { color = true }
+	for id in inv.owned or {} do
+		local it = Cosmetics.item(id)
+		if it ~= nil and (it.kind == "skin" or it.kind == "flag") then
+			has[it.kind] = true
+		end
+	end
+	for slot, id in inv.equipped or {} do
+		if id ~= nil then
+			has[slot] = true
+		end
+	end
+	local n = 0
+	for i, t in ipairs(Locker.TABS) do
+		local on = has[t[2]] == true
+		if on then
+			n += 1
+		end
+		if not on and self._tab == i then
+			self._tab = 1
+		end
+		local chip = self._tabs[i]
+		if chip ~= nil then
+			chip:set_visible(on)
+		end
+	end
+	for i, chip in ipairs(self._tabs) do
+		chip:set_pressed_no_signal(i == self._tab)
+	end
+	if self._tab_strip ~= nil then
+		self._tab_strip:set_visible(n > 1)
 	end
 end
 

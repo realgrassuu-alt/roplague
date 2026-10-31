@@ -17,9 +17,11 @@ local Staging: any = if IS_ROBLOX then require((script :: any).Parent.Staging) e
 
 local Subscription = {}
 
-Subscription.ID = "EXP-6347955979564483083"
-Subscription.STAGING = "EXP-287838471589069369"
-Subscription.NAME = "RoWorld General"
+-- (RoPlague, 2026-10-29: the original developer's subscription ids were removed. Create "RoPlague General"
+-- in our experience: Creator Dashboard > Monetization > Subscriptions, then put its "EXP-..." id here.)
+Subscription.ID = ""
+Subscription.STAGING = ""
+Subscription.NAME = "RoPlague General"
 --- The price set on the dashboard (Robux a month); the interface shows Roblox's own.
 Subscription.ROBUX = 399
 Subscription.DAILY_STARS = 2500

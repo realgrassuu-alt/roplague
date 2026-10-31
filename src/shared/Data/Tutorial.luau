@@ -40,7 +40,7 @@ Tutorial.RATIO_CAP = 0.5
 ---     sent every troop as it came never reached FLOOR_ARM, and the floor never held for the very
 ---     players it is for.
 ---   * Not before the FLOOR_FROM step (2026-10-27): on "grow" it refused taps the card asked for
----     ("Troops low. Let them grow back" under the card's "Keep tapping empty land to grow"), since
+---     ("Infected low. Let them grow back" under the card's "Keep tapping empty land to grow"), since
 ---     the cap climbs with every tile taken. Grow lost 11.6% of the players who reached it, the most
 ---     of any step, and 110,302 of its 175,898 left with Skip (the week to 2026-10-26). Before the
 ---     first neighbour there is nobody to fear, and the Attack bar's cap (RATIO_CAP) still holds.
@@ -48,7 +48,7 @@ Tutorial.TROOP_FLOOR = 0.25
 Tutorial.FLOOR_ARM = 0.35
 Tutorial.FLOOR_ARM_S = 10
 Tutorial.FLOOR_FROM = "attack"
-Tutorial.FLOOR_REASON = "Troops low. Let them grow back"
+Tutorial.FLOOR_REASON = "Infected low. Let them grow back"
 --- A new player's first ROOKIE_MATCHES matches (the tutorial's among them) keep a floor under the
 --- army after the tutorial too (2026-10-27): an order leaves ROOKIE_FLOOR of the army's cap at home,
 --- from the time it arms (floor_armed; client/UI/UIAdvisor.check_floor). An army
@@ -111,9 +111,9 @@ Tutorial.STEPS = {
 	{ id = "expand", touch = "Tap the land next to you to take it", desktop = "Click the land next to you to take it" },
 	{
 		id = "grow",
-		touch = "Tap empty land to expand",
-		desktop = "Click empty land to expand",
-		wait = "Now let your troops refill",
+		touch = "Tap empty land to infect it",
+		desktop = "Click empty land to infect it",
+		wait = "Now let your infected regrow",
 		-- (an order sent while they refill: it spends them, and the bar drops)
 		early = "Wait for the bar to fill",
 		bar = true,
@@ -127,8 +127,8 @@ Tutorial.STEPS = {
 	},
 	{
 		id = "ratio",
-		touch = "Tap 35% below. Keep troops home!",
-		desktop = "Click 35% on the Attack bar. Keep troops home!",
+		touch = "Tap 35% below. Keep some infected home!",
+		desktop = "Click 35% on the Attack bar. Keep some infected home!",
 		max_s = Tutorial.RATIO_MAX_S,
 	},
 	{

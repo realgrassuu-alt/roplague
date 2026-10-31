@@ -1,6 +1,9 @@
 --!strict
 -- Cosmetics you unlock from crates (2026-09-29: cosmetic loot boxes of territory skins and flags to
 -- unlock; 49 Robux a crate, the first 15; never a duplicate; paid only; one crate for both).
+-- RoPlague (2026-10-29): a crate holds INFECTION COLOURS (Data/Strains `crate`, items "color_<key>",
+-- kind "color", worn in the "color" slot like the shop's); RoWorld's skins and flags are still items
+-- (Cosmetics.world: a save keeps them, bots and AI nations wear them) but in no crate.
 --
 --   skins   a territory pattern: a 1-bit mask tiled over your land (primary vs
 --           secondary tiles; mask pixels are 2^scale tiles wide). '#' = the secondary colour: your
@@ -21,9 +24,9 @@ local IS_ROBLOX = typeof(game) == "Instance"
 local Flags: any = if IS_ROBLOX
 	then require((game :: any):GetService("ReplicatedStorage"):WaitForChild("Airfront").Assets.Flags)
 	else require("../Assets/Flags")
-local ShopFlags: any = if IS_ROBLOX
-	then require((game :: any):GetService("ReplicatedStorage"):WaitForChild("Airfront").Assets.ShopFlags)
-	else require("../Assets/ShopFlags")
+local Strains: any = if IS_ROBLOX
+	then require((game :: any):GetService("ReplicatedStorage"):WaitForChild("Airfront").Data.Strains)
+	else require("./Strains")
 local Shop: any = if IS_ROBLOX
 	then require((game :: any):GetService("ReplicatedStorage"):WaitForChild("Airfront").Data.Shop)
 	else require("./Shop")
@@ -335,12 +338,16 @@ Cosmetics.SECONDARY_ALPHA = 190
 type Item = { id: string, kind: string, name: string, rarity: string, [string]: any }
 
 local items: { [string]: Item } = {}
+--- the crate catalog (RoPlague, 2026-10-29: the crates' infection colours, Data/Strains `crate`)
 local order: { Item } = {}
+--- RoWorld's skins and flags: still items (a save owns them, multiplayer's bot players and AI nations
+--- wear them), no longer in a crate
+local world: { Item } = {}
 for _, s in Cosmetics.skins do
 	local it: any = table.clone(s)
 	it.kind = "skin"
 	items[it.id] = it
-	table.insert(order, it)
+	table.insert(world, it)
 end
 for _, f in (Flags.flags or {}) :: { any } do
 	local it: any = table.clone(f)
@@ -348,7 +355,27 @@ for _, f in (Flags.flags or {}) :: { any } do
 	it.kind = "flag"
 	it.rarity = "common"
 	items[it.id] = it
-	table.insert(order, it)
+	table.insert(world, it)
+end
+--- The item id prefix of a crate colour.
+Cosmetics.COLOR_PREFIX = "color_"
+for _, st in Strains.LIST :: { any } do
+	if st.crate then
+		local it: any = {
+			id = Cosmetics.COLOR_PREFIX .. st.key,
+			kind = "color",
+			key = st.key,
+			name = st.name,
+			rarity = st.rarity,
+			a = st.a,
+			b = st.b,
+			rainbow = st.rainbow,
+			crate_color = true,
+			image = "",
+		}
+		items[it.id] = it
+		table.insert(order, it)
+	end
 end
 -- (exclusives resolve by id like any item, but stay out of `order`: the crates, their odds, bot players)
 local exclusives: { Item } = {}
@@ -379,22 +406,22 @@ end
 
 -- (shop flags resolve by id too, and stay out of `order` like the exclusives)
 local shop_items: { Item } = {}
+-- (RoPlague: the shop's items are infection colours, kind "color", worn in the "color" slot)
 for _, f in Shop.flags() do
+	local st = Strains.get(f.key)
 	local it: any = {
 		id = Shop.item_id(f.key),
-		kind = "flag",
+		kind = "color",
 		shop = true,
 		key = f.key,
 		name = f.name,
 		rarity = f.rarity,
 		theme = f.theme,
 		set = f.set,
-		image = (ShopFlags.atlases or {})[f.atlas] or "",
-		x = f.x,
-		y = f.y,
-		w = f.w,
-		h = f.h,
-		big_rect = f.big_rect,
+		a = st and st.a,
+		b = st and st.b,
+		rainbow = st and st.rainbow,
+		image = "",
 	}
 	items[it.id] = it
 	table.insert(shop_items, it)
@@ -404,9 +431,29 @@ function Cosmetics.item(id: any): Item?
 	return if type(id) == "string" then items[id] else nil
 end
 
---- Every crate item (skins first, then flags by code). Exclusives are not in it (Cosmetics.exclusives).
+--- Every crate item (RoPlague: the crates' infection colours). Exclusives are not in it
+--- (Cosmetics.exclusives).
 function Cosmetics.all(): { Item }
 	return order
+end
+
+--- RoWorld's skins and flags (skins first, then flags by code): multiplayer's bot players and AI nations
+--- wear them; a save that has them keeps them. Not in a crate any more.
+function Cosmetics.world(): { Item }
+	return world
+end
+
+--- Every infection colour as an item: the shop's (Cosmetics.shop_items) then the crates'
+--- (Cosmetics.all), the Locker's COLOURS tab.
+function Cosmetics.colors(): { Item }
+	local out = {}
+	for _, it in shop_items do
+		table.insert(out, it)
+	end
+	for _, it in order do
+		table.insert(out, it)
+	end
+	return out
 end
 
 --- The items made for particular players (Cosmetics.exclusive_skins).
@@ -452,7 +499,7 @@ function Cosmetics.crate_owned(owned: { [string]: any }): number
 	local n = 0
 	for id in owned do
 		local it = items[id]
-		if it ~= nil and not it.exclusive and not it.shop and not it.general then
+		if it ~= nil and it.crate_color then
 			n += 1
 		end
 	end
@@ -485,12 +532,36 @@ end
 --- A flag item at its largest: (image, x, y, w, h). A shop flag has a big sheet (the shop's cards);
 --- any other flag is its usual rect.
 function Cosmetics.flag_big(it: any): (string, number, number, number, number)
-	local r = it and it.big_rect
-	local img = if type(r) == "table" then (ShopFlags.big or {})[r[1]] else nil
-	if img ~= nil then
-		return img, r[2], r[3], r[4], r[5]
-	end
+	-- (RoPlague: the shop's items are colours, drawn as swatches: Cosmetics.swatch)
 	return Cosmetics.flag_image(it), it and it.x or 0, it and it.y or 0, it and it.w or 0, it and it.h or 0
+end
+
+--- RoPlague: an infection colour item drawn into `frame` (a GuiObject): its two colours as a gradient
+--- and, for the rainbow strain, the whole wheel. Returns the UIGradient it set.
+function Cosmetics.swatch(it: any, frame: any): any
+	frame.BackgroundColor3 = Color3.new(1, 1, 1)
+	local g = frame:FindFirstChild("Swatch")
+	if g == nil then
+		g = Instance.new("UIGradient")
+		g.Name = "Swatch"
+		g.Parent = frame
+	end
+	g.Rotation = 35
+	if it ~= nil and it.rainbow then
+		local keys = {}
+		for i = 0, 6 do
+			table.insert(keys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6 % 1, 0.78, 1)))
+		end
+		g.Color = ColorSequence.new(keys)
+	else
+		local a, b = Strains.colors(it and it.key)
+		g.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, a),
+			ColorSequenceKeypoint.new(0.55, a:Lerp(b, 0.6)),
+			ColorSequenceKeypoint.new(1, b),
+		})
+	end
+	return g
 end
 
 --- A player's Roblox head shot: the `face` of a match's cosmetics map is their user id (since

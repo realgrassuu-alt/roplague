@@ -37,6 +37,7 @@
 -- of the attack whose border holds it); a tile in two attacks' borders at once goes to the second
 -- attack's `xb` set.
 local Defs = require("./Defs")
+local PLAGUE_FX = (require("../Data/WarTraits") :: any).effects({})
 local Ev = require("./Ev")
 local Rules = require("./Rules")
 local SimState = require("./SimState")
@@ -791,6 +792,15 @@ function SimAttacks.install(C: any)
 		local cap = R.MAX_TILES_PER_TICK
 		local budget = 1.0
 		local taken = 0
+		-- RoPlague: the attacker's evolutions (SimPlague.fx_of; DEFAULT = no change)
+		local fx = if self.fx_of ~= nil then self:fx_of(at) else PLAGUE_FX
+		local fx_loss = if neutral then fx.nloss else fx.loss
+		local fx_speed = fx.speed
+		local fx_post = fx.post
+		local fx_hill = fx.hill
+		local fx_mount = fx.mount
+		local T_HIGHLAND = Defs.T_HIGHLAND
+		local T_MOUNTAIN = Defs.T_MOUNTAIN
 		while budget > 0.0 do
 			if a.troops < 1.0 then
 				-- An attack that runs out of troops simply ends.
@@ -826,9 +836,21 @@ function SimAttacks.install(C: any)
 			local tt = readu8(terr, t)
 			local mag = ATTACK_MAG[tt]
 			local tc = ATTACK_TILE_COST[tt]
+			if tt == T_HIGHLAND then
+				mag *= fx_hill
+				tc *= fx_hill
+			elseif tt == T_MOUNTAIN then
+				mag *= fx_mount
+				tc *= fx_mount
+			end
 			if not neutral and readu8(def_cover, t) > 0 and self:_defense_post_covers(t, tg) then
-				mag *= Rules.DEFENSE_POST_MAG
-				tc *= Rules.DEFENSE_POST_COST
+				if fx_post == 1.0 then
+					mag *= Rules.DEFENSE_POST_MAG
+					tc *= Rules.DEFENSE_POST_COST
+				else
+					mag *= 1.0 + (Rules.DEFENSE_POST_MAG - 1.0) * fx_post
+					tc *= 1.0 + (Rules.DEFENSE_POST_COST - 1.0) * fx_post
+				end
 			end
 			if bit32.band(readu8(flags, t), F_FALLOUT) ~= 0 then
 				mag *= fo_mod
@@ -857,6 +879,8 @@ function SimAttacks.install(C: any)
 				local c2 = if r20 < 1.0 then 1.0 elseif r20 > 50.0 then 50.0 else r20
 				tf = c1 * c2 * tc * bonus_s * trait_s
 			end
+			loss *= fx_loss
+			tf *= fx_speed
 			if tf < 1e-6 then
 				tf = 1e-6
 			end

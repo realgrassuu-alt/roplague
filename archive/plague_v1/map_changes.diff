@@ -1,0 +1,3293 @@
+diff --git a/src/client/Map/FalloutGlow.luau b/src/client/Map/FalloutGlow.luau
+deleted file mode 100644
+index dad7d3a..0000000
+--- a/src/client/Map/FalloutGlow.luau
++++ /dev/null
+@@ -1,713 +0,0 @@
+---!native
+--- The glow of fresh fallout on the 2D map (2026-10-12, so irradiated land looks better and
+--- glows: the fallout used to be a flat green, with no glow).
+--- How it is made:
+---   * heat: a tile that turns to fallout is at heat 1, which drains by HEAT_DECAY_PER_TICK / 255 a game
+---     tick (gone in 25.5 s); a tile no longer fallout is at 0. Fallout already
+---     on the map when the state is bound has none.
+---   * the glow is worked out for one tile in every SCALE x SCALE block (its centre tile):
+---     a "broil" of two value noises, contrast and intensity mixed from
+---     cold to hot by the heat, a slower meta noise over it, all faded in by the heat; and, on some
+---     blocks (a hash over the threshold), a dot of light flickering at a rate of its own
+---     (the extract function). Kept in 0..1 (RGBA8).
+---   * a 5-tap Gaussian blur across and down (BLUR), then laid over the map, linearly
+---     filtered, times COVERAGE: one EditableImage
+---     of the blocks (straight alpha) stretched over the map in one ImageLabel, under the overlays.
+--- Worked out on the CPU, so redrawn UPDATE_S apart, not every frame, its noise (the costly part)
+--- for as many blocks as NOISE_BUDGET_S allows each time, round robin (the noise moves over seconds);
+--- not written on a frame the map surface wrote one of its images (MapSurface: Roblox shows one
+--- EditableImage update a frame), unless it has waited SKIP_MAX frames. (2026-10-26, phones' slow
+--- frames: its lists, noise and buffers are kept from one draw to the next, and the label is placed
+--- again only when the camera moved.)
+--- (2026-10-27, "Script - Fallout Glow" led phones' slow frames: a MIRV's or a few far-apart nukes'
+--- box is most of the image, and it was blurred whole every draw (a MIRV: ~32 ms a draw on a Mac,
+--- interpreted). Now only what the view can reach is drawn (`_win`: the view's blocks and a quarter
+--- view more each way, drawn again at once when the view leaves it for glow not drawn), the blur goes
+--- over the rows with glow and the columns it reaches, sliding along them (one read a cell, not five),
+--- a block's hashes are worked out once, phones redraw at UPDATE_S_MOBILE and a long draw waits DUTY
+--- times as long. The pixels drawn are the same.)
+-local AssetService = game:GetService("AssetService")
+-local UserInputService = game:GetService("UserInputService")
+-local RS = game:GetService("ReplicatedStorage")
+-local Airfront = RS:WaitForChild("Airfront")
+-local Defs = require(Airfront:WaitForChild("Core"):WaitForChild("Defs")) :: any
+-local FrameClock = require(script.Parent:WaitForChild("FrameClock")) :: any
+-
+-local FalloutGlow = {}
+-FalloutGlow.__index = FalloutGlow
+-
+-FalloutGlow.SCALE = 8 -- tiles a side of a glow block
+--- the glow's look
+-FalloutGlow.BROIL_SPEED_COLD = 0.0018
+-FalloutGlow.BROIL_SPEED_HOT = 0.0
+-FalloutGlow.NOISE_FREQ1 = 0.059
+-FalloutGlow.NOISE_FREQ2 = 0.171
+-FalloutGlow.CONTRAST_LO_COLD = 0.52
+-FalloutGlow.CONTRAST_LO_HOT = 0.0
+-FalloutGlow.CONTRAST_HI_COLD = 1.0
+-FalloutGlow.CONTRAST_HI_HOT = 0.0
+-FalloutGlow.META_FREQ = 0.02
+-FalloutGlow.INTENSITY_COLD = 0.15
+-FalloutGlow.INTENSITY_HOT = 1.8
+-FalloutGlow.META_INFLUENCE_COLD = 1.0
+-FalloutGlow.META_INFLUENCE_HOT = 0.0
+-FalloutGlow.OPACITY_FADE_END = 1.0
+-FalloutGlow.BLOOM = { 0.054901960784313725, 0.8196078431372549, 0.0 }
+-FalloutGlow.COVERAGE = 1.1
+-FalloutGlow.HEAT_DECAY_PER_TICK = 1.0
+-FalloutGlow.PARTICLE_DARK = { 0.05, 0.4, 0.05 }
+-FalloutGlow.PARTICLE_BRIGHT = { 0.2, 1.0, 0.2 }
+-FalloutGlow.PARTICLE_THRESHOLD_UNOWNED = 0.85
+-FalloutGlow.PARTICLE_THRESHOLD_OWNED = 0.875
+-FalloutGlow.PARTICLE_FLICKER_SPEED = 0.2
+-FalloutGlow.PARTICLE_STRENGTH = 1.0
+-FalloutGlow.PARTICLE_FRESH_SCALE = 0.2
+---- The blur's weights: the pixel, then 1 and 2 away
+-FalloutGlow.BLUR = { 0.375, 0.25, 0.0625 }
+--- pacing
+-FalloutGlow.UPDATE_S = 1 / 20
+---- Phones (touch, no keyboard): the glow changes over seconds, only its dots flicker faster
+-FalloutGlow.UPDATE_S_MOBILE = 1 / 12
+---- The next draw waits at least DUTY times as long as this one took (a slow phone's glow takes at
+---- most 1 / DUTY of its time, not every frame)
+-FalloutGlow.DUTY = 8
+-FalloutGlow.NOISE_BUDGET_S = 0.0015
+-FalloutGlow.SKIP_MAX = 2
+---- The window drawn: the view's blocks and CUSHION more each way (the linear filter and a frame of
+---- panning), then a quarter of the view (at least WIN_MIN blocks) more each way
+-FalloutGlow.CUSHION = 2
+-FalloutGlow.WIN_MIN = 4
+-FalloutGlow.Z = 1 -- in the overlay, under the rails
+-
+-local F_FALLOUT: number = Defs.F_FALLOUT
+-local band = bit32.band
+-local readu8 = buffer.readu8
+-local readi32 = buffer.readi32
+-local floor = math.floor
+-local sin = math.sin
+-
+-local function fract(x: number): number
+-	return x - floor(x)
+-end
+-
+-local function mix(a: number, b: number, t: number): number
+-	return a + (b - a) * t
+-end
+-
+---- smoothstep (0..1 between e0 and e1); with e0 >= e1 a step at e0 ((x - e0) / 0 is +inf above it).
+-local function smoothstep(e0: number, e1: number, x: number): number
+-	if e1 <= e0 then
+-		return if x > e0 then 1 else 0
+-	end
+-	local t = math.clamp((x - e0) / (e1 - e0), 0, 1)
+-	return t * t * (3 - 2 * t)
+-end
+-
+-local function hash3(x: number, y: number, z: number): number
+-	return fract(sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453)
+-end
+-
+---- Trilinear value noise, smoothstep-faded.
+-function FalloutGlow.vnoise3(px: number, py: number, pz: number): number
+-	local ix, iy, iz = floor(px), floor(py), floor(pz)
+-	local fx, fy, fz = px - ix, py - iy, pz - iz
+-	fx, fy, fz = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy), fz * fz * (3 - 2 * fz)
+-	local n000 = hash3(ix, iy, iz)
+-	local n100 = hash3(ix + 1, iy, iz)
+-	local n010 = hash3(ix, iy + 1, iz)
+-	local n110 = hash3(ix + 1, iy + 1, iz)
+-	local n001 = hash3(ix, iy, iz + 1)
+-	local n101 = hash3(ix + 1, iy, iz + 1)
+-	local n011 = hash3(ix, iy + 1, iz + 1)
+-	local n111 = hash3(ix + 1, iy + 1, iz + 1)
+-	return mix(mix(mix(n000, n100, fx), mix(n010, n110, fx), fy), mix(mix(n001, n101, fx), mix(n011, n111, fx), fy), fz)
+-end
+-
+-function FalloutGlow.new(parent: Instance, view: any)
+-	local self = setmetatable({}, FalloutGlow) :: any
+-	local label = Instance.new("ImageLabel")
+-	label.Name = "FalloutGlow"
+-	label.BackgroundTransparency = 1
+-	label.BorderSizePixel = 0
+-	label.ScaleType = Enum.ScaleType.Stretch
+-	label.ResampleMode = Enum.ResamplerMode.Default
+-	label.Active = false
+-	label.Visible = false
+-	label.ZIndex = FalloutGlow.Z
+-	label.Parent = parent
+-	self.label = label
+-	self.view = view
+-	self._state = nil :: any
+-	self._img = nil :: EditableImage?
+-	self._bw, self._bh = 0, 0
+-	--- block -> the tick its heat was 1 (blocks with heat); block -> fallout last seen (sample tiles)
+-	self._hot = {} :: { [number]: number }
+-	self._was = {} :: { [number]: boolean }
+-	--- block -> its noise (broil before contrast, meta) and when it was worked out
+-	self._noise = {} :: { [number]: { number } }
+-	self._order = {} :: { number }
+-	--- the hot blocks' next order (swapped with _order each draw)
+-	self._live = {} :: { number }
+-	self._rr = 1
+-	self._next = 0.0
+-	self._skipped = 0
+-	--- the pixel box written last time (cleared next time if it shrinks; the table is kept)
+-	self._box = nil :: { number }?
+-	self._box_buf = { 0, 0, 0, 0 }
+-	--- the label's last position and size (px)
+-	self._lx, self._ly, self._lw, self._lh = math.huge, math.huge, -1, -1
+-	--- the last box's pixels, and zeros of that size (WritePixelsBuffer takes a buffer of the box's
+-	--- size exactly; made again only when the box's size changes)
+-	self._out = nil :: buffer?
+-	self._out_cells = -1
+-	self._zero = nil :: buffer?
+-	self._zero_cells = -1
+-	--- block -> its dot's hashes (from where it is: worked out once)
+-	self._h1 = {} :: { [number]: number }
+-	self._h2 = {} :: { [number]: number }
+-	--- the last draw's box: the hot blocks and the blur's 2 blocks either side (i1 < i0: none)
+-	self._fb = { 0, 0, -1, -1 }
+-	--- the blocks the view can reach (i0, j0, i1, j1; none until the first tick), and per row of a
+-	--- draw's work box its first and last column with glow
+-	self._win = { 0, 0, -1, -1 }
+-	self._rlo = {} :: { number }
+-	self._rhi = {} :: { number }
+-	--- and per column the first and last row blurred across
+-	self._cf = {} :: { number }
+-	self._cl = {} :: { number }
+-	--- label.Visible as last written
+-	self._vis = false
+-	return self
+-end
+-
+-function FalloutGlow._show(self: any, on: boolean)
+-	if self._vis ~= on then
+-		self._vis = on
+-		self.label.Visible = on
+-	end
+-end
+-
+-function FalloutGlow.bind(self: any, state: any)
+-	self._state = state
+-	self:_reset()
+-end
+-
+-function FalloutGlow.unbind(self: any)
+-	self._state = nil
+-	table.clear(self._hot)
+-	table.clear(self._was)
+-	table.clear(self._noise)
+-	self:_show(false)
+-end
+-
+-function FalloutGlow.destroy(self: any)
+-	self:unbind()
+-	if self._img ~= nil then
+-		self._img:Destroy()
+-		self._img = nil
+-	end
+-	self.label:Destroy()
+-end
+-
+---- A state (re)loaded: what is fallout now has no heat.
+-function FalloutGlow.on_snapshot(self: any)
+-	self:_reset()
+-end
+-
+-function FalloutGlow._reset(self: any)
+-	table.clear(self._hot)
+-	table.clear(self._was)
+-	table.clear(self._noise)
+-	table.clear(self._h1)
+-	table.clear(self._h2)
+-	-- (cleared, not forgotten: a match that ended glowing left its pixels for the next one's first
+-	-- glow to show where that one's box did not reach)
+-	self:_clear_box()
+-	self._win[3], self._win[4] = -1, -1
+-	self._fb[3] = -1
+-	self:_show(false)
+-	local st = self._state
+-	if st == nil or st.map == nil or st.flags == nil then
+-		return
+-	end
+-	local W, H = st.map.W or Defs.W, st.map.H or Defs.H
+-	local S = FalloutGlow.SCALE
+-	local bw, bh = math.max(1, W // S), math.max(1, H // S)
+-	if bw ~= self._bw or bh ~= self._bh or self._img == nil then
+-		if self._img ~= nil then
+-			self._img:Destroy()
+-			self._img = nil
+-		end
+-		self._bw, self._bh = bw, bh
+-		local ok, img = pcall(function()
+-			return AssetService:CreateEditableImage({ Size = Vector2.new(bw, bh) })
+-		end)
+-		if ok and img ~= nil then
+-			self._img = img
+-			self.label.ImageContent = Content.fromObject(img)
+-		end
+-	end
+-	if (tonumber(st.fallout_count) or 1) <= 0 then
+-		return
+-	end
+-	local flags = st.flags
+-	local half = S // 2
+-	for j = 0, bh - 1 do
+-		local y = j * S + half
+-		if y >= H then
+-			break
+-		end
+-		for i = 0, bw - 1 do
+-			local x = i * S + half
+-			if x >= W then
+-				break
+-			end
+-			if band(readu8(flags, y * W + x), F_FALLOUT) ~= 0 then
+-				self._was[j * bw + i] = true
+-			end
+-		end
+-	end
+-end
+-
+---- GameState.flags_changed (tile * 256 + flags): a block's centre tile turned to fallout is hot.
+-function FalloutGlow.on_flags_changed(self: any, changed: { number })
+-	local st = self._state
+-	if st == nil or st.map == nil or self._bw == 0 then
+-		return
+-	end
+-	local W = st.map.W or Defs.W
+-	local S = FalloutGlow.SCALE
+-	local half = S // 2
+-	local bw, bh = self._bw, self._bh
+-	local tick = st.render_tick or st.tick or 0
+-	for _, v in changed do
+-		local tile = v // 256
+-		local x, y = tile % W, tile // W
+-		if x % S ~= half or y % S ~= half then
+-			continue
+-		end
+-		local i, j = x // S, y // S
+-		if i >= bw or j >= bh then
+-			continue
+-		end
+-		local b = j * bw + i
+-		local now = band(v % 256, F_FALLOUT) ~= 0
+-		local was = self._was[b] == true
+-		if now and not was then
+-			self._was[b] = true
+-			if self._hot[b] == nil then
+-				table.insert(self._order, b)
+-			end
+-			self._hot[b] = tick
+-			self._noise[b] = nil
+-		elseif was and not now then
+-			self._was[b] = nil
+-			self._hot[b] = nil
+-			self._noise[b] = nil
+-		end
+-	end
+-	self._next = 0
+-end
+-
+---- A block's dot hashes from its centre (cx, cy): h1 its colour and rate, h2 whether it has one.
+-local function hashes(cx: number, cy: number): (number, number)
+-	-- (tile coordinates of the centre tile)
+-	local tx, ty = cx - 0.5, cy - 0.5
+-	return fract(sin(tx * 12.9898 + ty * 78.233) * 43758.5453), fract(sin(tx * 63.7 + ty * 157.3) * 23421.631)
+-end
+-
+---- The glow of a block at heat `heat`, tick `rt`: premultiplied rgba,
+---- each in 0..1. `nz` = { broil noise, meta noise } (worked out when nil or stale), h1 / h2 its hashes.
+-local function extract(heat: number, rt: number, nz: { number }, owned: boolean, h1: number, h2: number)
+-	local G = FalloutGlow
+-	local lo = mix(G.CONTRAST_LO_COLD, G.CONTRAST_LO_HOT, heat)
+-	local hi = mix(G.CONTRAST_HI_COLD, G.CONTRAST_HI_HOT, heat)
+-	local broil = smoothstep(lo, hi, nz[1])
+-	local intensity = mix(G.INTENSITY_COLD, G.INTENSITY_HOT, heat)
+-		* mix(1.0, nz[2], mix(G.META_INFLUENCE_COLD, G.META_INFLUENCE_HOT, heat))
+-	local opacity = smoothstep(0.0, G.OPACITY_FADE_END, heat)
+-	local s = broil * intensity * opacity
+-	local col = G.BLOOM
+-	local r, g, bb, a = col[1] * s, col[2] * s, col[3] * s, s
+-	-- the particle dots
+-	if h2 >(if owned then G.PARTICLE_THRESHOLD_OWNED else G.PARTICLE_THRESHOLD_UNOWNED) then
+-		local rate = G.PARTICLE_FLICKER_SPEED * (0.4 + h1 * 1.2)
+-		local flick = math.max(0.0, sin(rt * rate + h1 * 12.0) * 0.8 + 0.2)
+-		flick *= flick
+-		flick *= mix(G.PARTICLE_FRESH_SCALE, 1.0, 1.0 - heat)
+-		flick *= opacity
+-		local k = flick * G.PARTICLE_STRENGTH
+-		local d, br = G.PARTICLE_DARK, G.PARTICLE_BRIGHT
+-		local pr, pg, pb = mix(d[1], br[1], h1) * k, mix(d[2], br[2], h1) * k, mix(d[3], br[3], h1) * k
+-		r, g, bb, a = r + pr, g + pg, bb + pb, a + math.max(pr, pg, pb)
+-	end
+-	return math.min(r, 1), math.min(g, 1), math.min(bb, 1), math.min(a, 1)
+-end
+-
+---- (written into the block's own table, `into`, when it has one)
+-local function noise_of(cx: number, cy: number, heat: number, rt: number, into: { number }?): { number }
+-	local G = FalloutGlow
+-	local t = rt * mix(G.BROIL_SPEED_COLD, G.BROIL_SPEED_HOT, heat)
+-	local n1 = FalloutGlow.vnoise3(cx * G.NOISE_FREQ1, cy * G.NOISE_FREQ1, t)
+-	local n2 = FalloutGlow.vnoise3(cx * G.NOISE_FREQ2, cy * G.NOISE_FREQ2, t * 1.3)
+-	local meta = FalloutGlow.vnoise3(cx * G.META_FREQ, cy * G.META_FREQ, t * 0.5)
+-	if into ~= nil then
+-		into[1], into[2] = n1 * 0.6 + n2 * 0.4, meta
+-		return into
+-	end
+-	return { n1 * 0.6 + n2 * 0.4, meta }
+-end
+-
+---- The window follows the view: when the view's blocks (and CUSHION) leave it, or it is far bigger
+---- than they are (zoomed in), it is made again around them, a quarter of the view more each way.
+---- True when that shows glow the last draw did not (a draw is due now).
+-function FalloutGlow._follow_view(self: any, cam: any): boolean
+-	local S, c = FalloutGlow.SCALE, FalloutGlow.CUSHION
+-	local u0, v0, u1, v1 = cam:visible_rect()
+-	local vi0, vj0, vi1, vj1 = floor(u0 / S) - c, floor(v0 / S) - c, floor(u1 / S) + c, floor(v1 / S) + c
+-	local win = self._win
+-	local left = vi0 < win[1] or vj0 < win[2] or vi1 > win[3] or vj1 > win[4]
+-	local vw, vh = vi1 - vi0 + 1, vj1 - vj0 + 1
+-	if left or win[3] - win[1] + 1 > 3 * vw or win[4] - win[2] + 1 > 3 * vh then
+-		local mi, mj = math.max(FalloutGlow.WIN_MIN, vw // 4), math.max(FalloutGlow.WIN_MIN, vh // 4)
+-		win[1], win[2], win[3], win[4] = vi0 - mi, vj0 - mj, vi1 + mi, vj1 + mj
+-	end
+-	if not left then
+-		return false
+-	end
+-	-- the glow's box (as of the last draw) where the view now is, and whether that was drawn
+-	local fb = self._fb
+-	if fb[3] < fb[1] then
+-		return false
+-	end
+-	local i0, j0 = math.max(vi0, fb[1]), math.max(vj0, fb[2])
+-	local i1, j1 = math.min(vi1, fb[3]), math.min(vj1, fb[4])
+-	if i1 < i0 or j1 < j0 then
+-		return false
+-	end
+-	local box = self._box
+-	return box == nil or i0 < box[1] or j0 < box[2] or i1 > box[3] or j1 > box[4]
+-end
+-
+-function FalloutGlow.tick(self: any, _dt: number)
+-	local st = self._state
+-	local label = self.label
+-	if st == nil or self._img == nil then
+-		return
+-	end
+-	local cam = self.view.rig
+-	local W, H = st.map.W or Defs.W, st.map.H or Defs.H
+-	if next(self._hot) == nil then
+-		if self._vis then
+-			self:_show(false)
+-			self:_clear_box()
+-		end
+-		return
+-	end
+-	-- (laid over the map, moved when the camera did; drawn again UPDATE_S apart)
+-	local x0, y0 = cam:map_to_screen(0, 0)
+-	local x1, y1 = cam:map_to_screen(W, H)
+-	if x0 ~= self._lx or y0 ~= self._ly then
+-		self._lx, self._ly = x0, y0
+-		label.Position = UDim2.fromOffset(x0, y0)
+-	end
+-	if x1 - x0 ~= self._lw or y1 - y0 ~= self._lh then
+-		self._lw, self._lh = x1 - x0, y1 - y0
+-		label.Size = UDim2.fromOffset(x1 - x0, y1 - y0)
+-	end
+-	local now = FrameClock.now()
+-	-- (the view about to show what was not drawn: drawn now)
+-	if self:_follow_view(cam) then
+-		self._next = 0
+-	end
+-	if now < self._next then
+-		return
+-	end
+-	local surface = self.view.surface
+-	if surface ~= nil and surface.uploaded and self._skipped < FalloutGlow.SKIP_MAX then
+-		self._skipped += 1
+-		return
+-	end
+-	self._skipped = 0
+-	local t0 = os.clock()
+-	self:_draw(st, W)
+-	local wait = if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+-		then FalloutGlow.UPDATE_S_MOBILE
+-		else FalloutGlow.UPDATE_S
+-	-- (not while a Studio film steps the clock: its frames take real time the film does not)
+-	if FrameClock.film == nil then
+-		wait = math.max(wait, (os.clock() - t0) * FalloutGlow.DUTY)
+-	end
+-	self._next = now + wait
+-end
+-
+-function FalloutGlow._clear_box(self: any)
+-	local box = self._box
+-	local img = self._img
+-	if box == nil or img == nil then
+-		return
+-	end
+-	local w, h = box[3] - box[1] + 1, box[4] - box[2] + 1
+-	-- (zeros, never written to: kept while boxes of this size come and go)
+-	if self._zero_cells ~= w * h then
+-		self._zero_cells = w * h
+-		self._zero = buffer.create(w * h * 4)
+-	end
+-	img:WritePixelsBuffer(Vector2.new(box[1], box[2]), Vector2.new(w, h), self._zero :: buffer)
+-	self._box = nil
+-end
+-
+-function FalloutGlow._draw(self: any, st: any, W: number)
+-	local G = FalloutGlow
+-	local S = G.SCALE
+-	local half = S / 2
+-	local bw, bh = self._bw, self._bh
+-	local rt = st.render_tick or st.tick or 0
+-	local own = st.owner
+-	local decay = G.HEAT_DECAY_PER_TICK / 255
+-	local hot, noise = self._hot, self._noise
+-	-- the hot blocks (the cold ones go) and their box (into the other list, swapped with this one)
+-	local order = self._order
+-	local live = self._live
+-	table.clear(live)
+-	local n, missing = 0, 0
+-	local i0, j0, i1, j1 = math.huge, math.huge, -1, -1
+-	for _, b in order do
+-		local t0 = hot[b]
+-		if t0 == nil then
+-			continue
+-		end
+-		local heat = 1 - (rt - t0) * decay
+-		if heat <= 0 then
+-			hot[b] = nil
+-			noise[b] = nil
+-			continue
+-		end
+-		n += 1
+-		live[n] = b
+-		if noise[b] == nil then
+-			missing += 1
+-		end
+-		local i, j = b % bw, b // bw
+-		if i < i0 then
+-			i0 = i
+-		end
+-		if i > i1 then
+-			i1 = i
+-		end
+-		if j < j0 then
+-			j0 = j
+-		end
+-		if j > j1 then
+-			j1 = j
+-		end
+-	end
+-	self._order, self._live = live, order
+-	local fb = self._fb
+-	if n == 0 then
+-		fb[3] = -1
+-		self:_clear_box()
+-		self:_show(false)
+-		return
+-	end
+-	fb[1], fb[2], fb[3], fb[4] = math.max(0, i0 - 2), math.max(0, j0 - 2), math.min(bw - 1, i1 + 2), math.min(bh - 1, j1 + 2)
+-	-- the noise: as many blocks as the budget allows, round robin; a block without any first (past
+-	-- the budget only those: the clock is not asked again, and the loop stops when none is left)
+-	local deadline = os.clock() + G.NOISE_BUDGET_S
+-	local spent = false
+-	local rr = ((self._rr - 1) % n) + 1
+-	for k = 0, n - 1 do
+-		local b = live[(rr + k - 1) % n + 1]
+-		local nz = noise[b]
+-		if nz ~= nil then
+-			if spent then
+-				continue
+-			elseif os.clock() > deadline then
+-				spent = true
+-				if missing == 0 then
+-					break
+-				end
+-				continue
+-			end
+-		else
+-			missing -= 1
+-		end
+-		local heat = 1 - (rt - hot[b]) * decay
+-		local cx, cy = (b % bw) * S + half + 0.5, (b // bw) * S + half + 0.5
+-		noise[b] = noise_of(cx, cy, heat, rt, nz)
+-		self._rr = (rr + k) % n + 1
+-		if spent and missing == 0 then
+-			break
+-		end
+-	end
+-	-- what is drawn (R): the box, 2 blocks of blur either side, inside the image and the window;
+-	-- worked out over K, R and the blur's reach (2 blocks) inside the image. (Clamped at K's edges
+-	-- as the box was at its own: at the image's edge the same, elsewhere R's blur stays inside K.)
+-	local win = self._win
+-	local ri0, rj0 = math.max(0, i0 - 2, win[1]), math.max(0, j0 - 2, win[2])
+-	local ri1, rj1 = math.min(bw - 1, i1 + 2, win[3]), math.min(bh - 1, j1 + 2, win[4])
+-	if ri1 < ri0 or rj1 < rj0 then
+-		-- (none of it where the view is or can go before the next draw)
+-		self:_clear_box()
+-		self:_show(false)
+-		return
+-	end
+-	local ki0, kj0 = math.max(0, ri0 - 2), math.max(0, rj0 - 2)
+-	local kw, kh = math.min(bw - 1, ri1 + 2) - ki0 + 1, math.min(bh - 1, rj1 + 2) - kj0 + 1
+-	local w, h = ri1 - ri0 + 1, rj1 - rj0 + 1
+-	-- extract (premultiplied) into a float grid of K (scratch buffers kept, grown as needed)
+-	local kcells, cells = kw * kh, w * h
+-	if self._cap == nil or self._cap < kcells then
+-		self._cap = kcells
+-		self._grid = buffer.create(kcells * 16)
+-		self._tmp = buffer.create(kcells * 16)
+-	end
+-	if self._out_cells ~= cells then
+-		self._out_cells = cells
+-		self._out = buffer.create(cells * 4)
+-	end
+-	local grid, tmp = self._grid, self._tmp
+-	local out = self._out :: buffer
+-	buffer.fill(grid, 0, 0, kcells * 16)
+-	buffer.fill(tmp, 0, 0, kcells * 16)
+-	buffer.fill(out, 0, 0, cells * 4)
+-	-- each row's first and last column with glow (1-based by row)
+-	local rlo, rhi = self._rlo, self._rhi
+-	for y = 1, kh do
+-		rlo[y], rhi[y] = kw, -1
+-	end
+-	local h1s, h2s = self._h1, self._h2
+-	local ki1, kj1 = ki0 + kw - 1, kj0 + kh - 1
+-	local writef32, readf32, writeu8 = buffer.writef32, buffer.readf32, buffer.writeu8
+-	for _, b in live do
+-		local i, j = b % bw, b // bw
+-		if i < ki0 or i > ki1 or j < kj0 or j > kj1 then
+-			continue
+-		end
+-		local heat = 1 - (rt - hot[b]) * decay
+-		local tile = (j * S + S // 2) * W + i * S + S // 2
+-		local owned = own ~= nil and readi32(own, tile * 4) > 0
+-		local h1, h2 = h1s[b], h2s[b]
+-		if h1 == nil then
+-			h1, h2 = hashes(i * S + half + 0.5, j * S + half + 0.5)
+-			h1s[b], h2s[b] = h1, h2
+-		end
+-		local r, g, bb, a = extract(heat, rt, noise[b], owned, h1, h2)
+-		local x, y = i - ki0, j - kj0 + 1
+-		local o = ((y - 1) * kw + x) * 16
+-		writef32(grid, o, r)
+-		writef32(grid, o + 4, g)
+-		writef32(grid, o + 8, bb)
+-		writef32(grid, o + 12, a)
+-		if x < rlo[y] then
+-			rlo[y] = x
+-		end
+-		if x > rhi[y] then
+-			rhi[y] = x
+-		end
+-	end
+-	-- blur across, then down, over R's columns that a glowing block reaches (the rest stays zero).
+-	-- Each pass slides a window of the 5 cells it weighs along its row / column: one read per cell
+-	-- and channel, not five (the same sums in the same order).
+-	local wt = G.BLUR
+-	local w0, w1, w2 = wt[1], wt[2], wt[3]
+-	local cov = G.COVERAGE
+-	local xr0, xr1, yr0 = ri0 - ki0, ri1 - ki0, rj0 - kj0
+-	-- per column of K: the first and last row blurred across (1-based by column; -1: none)
+-	local cf, cl = self._cf, self._cl
+-	for x = xr0 + 1, xr1 + 1 do
+-		cf[x], cl[x] = -1, -1
+-	end
+-	for y = 0, kh - 1 do
+-		local lo, hi = rlo[y + 1], rhi[y + 1]
+-		if hi < 0 then
+-			continue
+-		end
+-		local xa, xb = math.max(xr0, lo - 2), math.min(xr1, hi + 2)
+-		if xb < xa then
+-			continue
+-		end
+-		local row = y * kw
+-		local q = (row + math.max(0, xa - 2)) * 16
+-		local rm2, gm2, bm2, am2 = readf32(grid, q), readf32(grid, q + 4), readf32(grid, q + 8), readf32(grid, q + 12)
+-		q = (row + math.max(0, xa - 1)) * 16
+-		local rm1, gm1, bm1, am1 = readf32(grid, q), readf32(grid, q + 4), readf32(grid, q + 8), readf32(grid, q + 12)
+-		q = (row + xa) * 16
+-		local r0, g0, b0, a0 = readf32(grid, q), readf32(grid, q + 4), readf32(grid, q + 8), readf32(grid, q + 12)
+-		q = (row + math.min(kw - 1, xa + 1)) * 16
+-		local rp1, gp1, bp1, ap1 = readf32(grid, q), readf32(grid, q + 4), readf32(grid, q + 8), readf32(grid, q + 12)
+-		q = (row + math.min(kw - 1, xa + 2)) * 16
+-		local rp2, gp2, bp2, ap2 = readf32(grid, q), readf32(grid, q + 4), readf32(grid, q + 8), readf32(grid, q + 12)
+-		for x = xa, xb do
+-			local p = (row + x) * 16
+-			writef32(tmp, p, r0 * w0 + (rp1 + rm1) * w1 + (rp2 + rm2) * w2)
+-			writef32(tmp, p + 4, g0 * w0 + (gp1 + gm1) * w1 + (gp2 + gm2) * w2)
+-			writef32(tmp, p + 8, b0 * w0 + (bp1 + bm1) * w1 + (bp2 + bm2) * w2)
+-			writef32(tmp, p + 12, a0 * w0 + (ap1 + am1) * w1 + (ap2 + am2) * w2)
+-			if cl[x + 1] < 0 then
+-				cf[x + 1] = y
+-			end
+-			cl[x + 1] = y
+-			q = (row + math.min(kw - 1, x + 3)) * 16
+-			rm2, rm1, r0, rp1, rp2 = rm1, r0, rp1, rp2, readf32(grid, q)
+-			gm2, gm1, g0, gp1, gp2 = gm1, g0, gp1, gp2, readf32(grid, q + 4)
+-			bm2, bm1, b0, bp1, bp2 = bm1, b0, bp1, bp2, readf32(grid, q + 8)
+-			am2, am1, a0, ap1, ap2 = am1, a0, ap1, ap2, readf32(grid, q + 12)
+-		end
+-	end
+-	local yr1 = yr0 + h - 1
+-	for x = xr0, xr1 do
+-		local last = cl[x + 1]
+-		if last < 0 then
+-			continue
+-		end
+-		-- R's rows the blur down reaches in this column
+-		local ya, yb = math.max(yr0, cf[x + 1] - 2), math.min(yr1, last + 2)
+-		if yb < ya then
+-			continue
+-		end
+-		local q = (math.max(0, ya - 2) * kw + x) * 16
+-		local rm2, gm2, bm2, am2 = readf32(tmp, q), readf32(tmp, q + 4), readf32(tmp, q + 8), readf32(tmp, q + 12)
+-		q = (math.max(0, ya - 1) * kw + x) * 16
+-		local rm1, gm1, bm1, am1 = readf32(tmp, q), readf32(tmp, q + 4), readf32(tmp, q + 8), readf32(tmp, q + 12)
+-		q = (ya * kw + x) * 16
+-		local r0, g0, b0, a0 = readf32(tmp, q), readf32(tmp, q + 4), readf32(tmp, q + 8), readf32(tmp, q + 12)
+-		q = (math.min(kh - 1, ya + 1) * kw + x) * 16
+-		local rp1, gp1, bp1, ap1 = readf32(tmp, q), readf32(tmp, q + 4), readf32(tmp, q + 8), readf32(tmp, q + 12)
+-		q = (math.min(kh - 1, ya + 2) * kw + x) * 16
+-		local rp2, gp2, bp2, ap2 = readf32(tmp, q), readf32(tmp, q + 4), readf32(tmp, q + 8), readf32(tmp, q + 12)
+-		for yk = ya, yb do
+-			-- (alpha first: a pixel with none is left clear; each channel times COVERAGE, at most 1)
+-			local a = math.min(1, (a0 * w0 + (ap1 + am1) * w1 + (ap2 + am2) * w2) * cov)
+-			if a > 0.002 then
+-				-- premultiplied to straight alpha for the GUI
+-				local o = ((yk - yr0) * w + x - xr0) * 4
+-				local r = math.min(1, (r0 * w0 + (rp1 + rm1) * w1 + (rp2 + rm2) * w2) * cov)
+-				local g = math.min(1, (g0 * w0 + (gp1 + gm1) * w1 + (gp2 + gm2) * w2) * cov)
+-				local bb = math.min(1, (b0 * w0 + (bp1 + bm1) * w1 + (bp2 + bm2) * w2) * cov)
+-				writeu8(out, o, math.min(255, floor(r / a * 255 + 0.5)))
+-				writeu8(out, o + 1, math.min(255, floor(g / a * 255 + 0.5)))
+-				writeu8(out, o + 2, math.min(255, floor(bb / a * 255 + 0.5)))
+-				writeu8(out, o + 3, floor(a * 255 + 0.5))
+-			end
+-			q = (math.min(kh - 1, yk + 3) * kw + x) * 16
+-			rm2, rm1, r0, rp1, rp2 = rm1, r0, rp1, rp2, readf32(tmp, q)
+-			gm2, gm1, g0, gp1, gp2 = gm1, g0, gp1, gp2, readf32(tmp, q + 4)
+-			bm2, bm1, b0, bp1, bp2 = bm1, b0, bp1, bp2, readf32(tmp, q + 8)
+-			am2, am1, a0, ap1, ap2 = am1, a0, ap1, ap2, readf32(tmp, q + 12)
+-		end
+-	end
+-	-- the last box where this one does not reach is cleared first
+-	local box = self._box
+-	if box ~= nil and (box[1] < ri0 or box[2] < rj0 or box[3] > ri1 or box[4] > rj1) then
+-		self:_clear_box()
+-	end
+-	local img = self._img :: EditableImage
+-	img:WritePixelsBuffer(Vector2.new(ri0, rj0), Vector2.new(w, h), out)
+-	local nb = self._box_buf
+-	nb[1], nb[2], nb[3], nb[4] = ri0, rj0, ri1, rj1
+-	self._box = nb
+-	self:_show(true)
+-end
+-
+-return FalloutGlow
+diff --git a/src/client/Map/FrontLayer.luau b/src/client/Map/FrontLayer.luau
+deleted file mode 100644
+index 1818e24..0000000
+--- a/src/client/Map/FrontLayer.luau
++++ /dev/null
+@@ -1,411 +0,0 @@
+---!native
+--- Troop counts on the local player's fronts (a label per attack front, floating over the map):
+--- every 200 ms, for each attack by the local player on another owner (blue
+--- #3fa9f5) and each attack on the local player by a player or nation, not a tribe (red #f87171),
+--- the front is split into connected clusters (8-neighbours); the two largest (clusters under 30
+--- full-size tiles dropped, the largest always kept) get a label with the attack's troops
+--- (render_troops) at the front tile nearest the cluster's centroid. Labels glide to new positions
+--- over 250 ms (snap beyond 200 full-size tiles) and keep a constant on-screen size.
+---
+--- The front: the label belongs on the attack's frontier, the whole shared border; the
+--- client has no frontier, so it uses the local player's border tiles (UI BorderTracker, handed
+--- over with set_borders) that touch the other owner.
+--- (2026-10-26, phones' slow frames: a poll works in tables kept from one poll to the next, and a label
+--- is written only what changed.)
+-local RS = game:GetService("ReplicatedStorage")
+-local Airfront = RS:WaitForChild("Airfront")
+-local Core = Airfront:WaitForChild("Core")
+-local Defs = require(Core:WaitForChild("Defs")) :: any
+-local Rules = require(Core:WaitForChild("Rules")) :: any
+-local NumberFormat = require(Core:WaitForChild("NumberFormat")) :: any
+-local FrameClock = require(script.Parent:WaitForChild("FrameClock")) :: any
+-
+-local FrontLayer = {}
+-FrontLayer.__index = FrontLayer
+-
+-FrontLayer.POLL_S = 0.2
+-FrontLayer.ANIM_S = 0.25
+-FrontLayer.SNAP_FULL = 200 -- full-size tiles
+-FrontLayer.MIN_CLUSTER_FULL = 30 -- full-size tiles
+-FrontLayer.MAX_CLUSTERS = 2
+-FrontLayer.OUTGOING = Color3.fromRGB(0x3f, 0xa9, 0xf5)
+-FrontLayer.INCOMING = Color3.fromRGB(0xf8, 0x71, 0x71)
+-FrontLayer.TEXT_PX = 17
+-FrontLayer.FONT = Font.fromId(12187365977, Enum.FontWeight.Bold)
+-FrontLayer.Z = 24
+-
+-type Slot = { cx: number, cy: number, sx: number, sy: number, dx: number, dy: number, t0: number }
+-type Entry = { text: string, incoming: boolean, slots: { Slot }, seen: boolean }
+---- A label and what it was last given (Roblox's own values, kept here).
+-type Label = { label: TextLabel, vis: boolean, text: string?, incoming: boolean?, x: number, y: number }
+---- An attack worth a label, this poll.
+-type Todo = { aid: number, other: number, incoming: boolean, troops: number }
+-
+-function FrontLayer.new(parent: Instance, view: any)
+-	local self = setmetatable({}, FrontLayer) :: any
+-	local root = Instance.new("Frame")
+-	root.Name = "Fronts"
+-	root.BackgroundTransparency = 1
+-	root.Size = UDim2.fromScale(1, 1)
+-	root.ZIndex = FrontLayer.Z
+-	root.Parent = parent
+-	self.root = root
+-	self.view = view
+-	self._state = nil :: any
+-	self._borders = nil :: any
+-	--- aid -> label entry
+-	self._entries = {} :: { [number]: Entry }
+-	self._labels = {} :: { Label }
+-	self._poll = 0.0
+-	--- (a poll's working tables: the owners wanted, the attacks (records reused), owner -> front
+-	--- tiles (an empty list: none))
+-	self._wanted = {} :: { [number]: boolean }
+-	self._todo = {} :: { Todo }
+-	self._fronts = {} :: { [number]: { number } }
+-	return self
+-end
+-
+-function FrontLayer.bind(self: any, state: any)
+-	self._state = state
+-	table.clear(self._entries)
+-	self._poll = 0.0
+-end
+-
+-function FrontLayer.unbind(self: any)
+-	self._state = nil
+-	table.clear(self._entries)
+-	for _, l in self._labels do
+-		l.vis = false
+-		l.label.Visible = false
+-	end
+-end
+-
+-function FrontLayer.destroy(self: any)
+-	self:unbind()
+-	self.root:Destroy()
+-end
+-
+---- The UI's BorderTracker (its `border` set holds the local player's border tiles).
+-function FrontLayer.set_borders(self: any, tracker: any)
+-	self._borders = tracker
+-end
+-
+---- Border tiles of the local player touching each owner in `wanted`, into `out`: owner -> { tile }
+---- (its lists emptied first and kept; an owner with none has an empty list or none).
+-local function fronts_by_owner(
+-	st: any,
+-	border: { [number]: boolean },
+-	wanted: { [number]: boolean },
+-	out: { [number]: { number } }
+-)
+-	for _, list in out do
+-		table.clear(list)
+-	end
+-	local W = st.map.W or Defs.W
+-	local N = st.map.N or (W * (st.map.H or Defs.H))
+-	for t in border do
+-		local x = t % W
+-		local hit = 0
+-		local o = 0
+-		if x > 0 then
+-			o = st:tile_owner(t - 1)
+-			if wanted[o] then
+-				hit = o
+-			end
+-		end
+-		if hit == 0 and x < W - 1 then
+-			o = st:tile_owner(t + 1)
+-			if wanted[o] then
+-				hit = o
+-			end
+-		end
+-		if hit == 0 and t >= W then
+-			o = st:tile_owner(t - W)
+-			if wanted[o] then
+-				hit = o
+-			end
+-		end
+-		if hit == 0 and t + W < N then
+-			o = st:tile_owner(t + W)
+-			if wanted[o] then
+-				hit = o
+-			end
+-		end
+-		if hit ~= 0 then
+-			local list = out[hit]
+-			if list == nil then
+-				list = {}
+-				out[hit] = list
+-			end
+-			table.insert(list, t)
+-		end
+-	end
+-end
+-
+--- clusters()'s working tables, kept (it runs for each front every POLL_S): the tiles, those reached,
+--- one cluster's queue, the clusters found (records reused from c_pool) and the result
+-local c_set: { [number]: boolean } = {}
+-local c_seen: { [number]: boolean } = {}
+-local c_queue: { number } = {}
+-local c_found: { { tile: number, size: number } } = {}
+-local c_pool: { { tile: number, size: number } } = {}
+-local c_out: { number } = {}
+-
+-local function by_size(a: { tile: number, size: number }, b: { tile: number, size: number }): boolean
+-	return a.size > b.size
+-end
+-
+---- Representative tiles of the largest connected clusters of `tiles` (the list is reused by the
+---- next call).
+-local function clusters(tiles: { number }, W: number, min_size: number, max_n: number): { number }
+-	local set, seen, queue, found = c_set, c_seen, c_queue, c_found
+-	table.clear(set)
+-	table.clear(seen)
+-	table.clear(found)
+-	for _, t in tiles do
+-		set[t] = true
+-	end
+-	for _, start in tiles do
+-		if seen[start] then
+-			continue
+-		end
+-		seen[start] = true
+-		table.clear(queue)
+-		queue[1] = start
+-		local qi = 1
+-		local sx, sy = 0, 0
+-		while qi <= #queue do
+-			local t = queue[qi]
+-			qi += 1
+-			local x = t % W
+-			sx += x
+-			sy += t // W
+-			for dy = -1, 1 do
+-				for dx = -1, 1 do
+-					if dx == 0 and dy == 0 then
+-						continue
+-					end
+-					local nx = x + dx
+-					if nx < 0 or nx >= W then
+-						continue
+-					end
+-					local n = t + dy * W + dx
+-					if set[n] and not seen[n] then
+-						seen[n] = true
+-						table.insert(queue, n)
+-					end
+-				end
+-			end
+-		end
+-		local count = #queue
+-		local cx, cy = sx / count, sy / count
+-		local best, bd = queue[1], math.huge
+-		for _, t in queue do
+-			local ddx, ddy = t % W - cx, t // W - cy
+-			local d = ddx * ddx + ddy * ddy
+-			if d < bd then
+-				bd = d
+-				best = t
+-			end
+-		end
+-		local nf = #found + 1
+-		local rec = c_pool[nf]
+-		if rec == nil then
+-			rec = { tile = 0, size = 0 }
+-			c_pool[nf] = rec
+-		end
+-		rec.tile, rec.size = best, count
+-		found[nf] = rec
+-	end
+-	table.sort(found, by_size)
+-	local out = c_out
+-	table.clear(out)
+-	for i, c in found do
+-		if #out >= max_n then
+-			break
+-		end
+-		if i == 1 or c.size >= min_size then
+-			table.insert(out, c.tile)
+-		end
+-	end
+-	return out
+-end
+-
+---- A slot's distance to tile `t`'s centre (map units, Manhattan).
+-local function slot_dist(s: Slot, t: number, W: number): number
+-	return math.abs(s.dx - (t % W + 0.5)) + math.abs(s.dy - (t // W + 0.5))
+-end
+-
+-function FrontLayer._poll_fronts(self: any, now: number)
+-	local st = self._state
+-	local me = if st ~= nil then st.local_owner else 0
+-	local tracker = self._borders
+-	for _, e in self._entries do
+-		e.seen = false
+-	end
+-	if st == nil or me == 0 or tracker == nil or tracker.me ~= me then
+-		table.clear(self._entries)
+-		return
+-	end
+-	-- attacks worth a label (outgoing on players, incoming from non-tribe players)
+-	local wanted = self._wanted
+-	table.clear(wanted)
+-	local todo = self._todo
+-	local todo_n = 0
+-	for aid, a in st.attacks do
+-		local other = 0
+-		local incoming = false
+-		if a.attacker == me and a.target ~= 0 then
+-			other = a.target
+-		elseif a.target == me and a.attacker ~= 0 then
+-			local o = st:get_owner(a.attacker)
+-			if o ~= nil and o.kind ~= Defs.KIND_TRIBE then
+-				other = a.attacker
+-				incoming = true
+-			end
+-		end
+-		if other ~= 0 then
+-			wanted[other] = true
+-			todo_n += 1
+-			local rec = todo[todo_n]
+-			if rec == nil then
+-				rec = {} :: any
+-				todo[todo_n] = rec
+-			end
+-			rec.aid, rec.other, rec.incoming, rec.troops = aid, other, incoming, a.troops
+-		end
+-	end
+-	if todo_n > 0 then
+-		local k = tonumber(st.map.k_lin) or Rules.K_LIN
+-		local W = st.map.W or Defs.W
+-		local fronts = self._fronts
+-		fronts_by_owner(st, tracker.border, wanted, fronts)
+-		local snap = FrontLayer.SNAP_FULL / k
+-		for ti = 1, todo_n do
+-			local a = todo[ti]
+-			local tiles = fronts[a.other]
+-			if tiles == nil or #tiles == 0 then
+-				continue
+-			end
+-			local reps = clusters(tiles, W, FrontLayer.MIN_CLUSTER_FULL / k, FrontLayer.MAX_CLUSTERS)
+-			local e = self._entries[a.aid]
+-			if e == nil then
+-				e = { text = "", incoming = a.incoming, slots = {}, seen = true }
+-				self._entries[a.aid] = e
+-			end
+-			e.seen = true
+-			e.incoming = a.incoming
+-			e.text = NumberFormat.render_troops(a.troops)
+-			local slots = e.slots
+-			-- keep two labels on their own clusters (swapped when that is shorter)
+-			if #reps == 2 and #slots == 2 then
+-				local s1, s2 = slots[1], slots[2]
+-				if
+-					slot_dist(s1, reps[2], W) + slot_dist(s2, reps[1], W)
+-					< slot_dist(s1, reps[1], W) + slot_dist(s2, reps[2], W)
+-				then
+-					reps[1], reps[2] = reps[2], reps[1]
+-				end
+-			end
+-			while #slots > #reps do
+-				table.remove(slots)
+-			end
+-			for i, t in reps do
+-				local nx, ny = t % W + 0.5, t // W + 0.5
+-				local s = slots[i]
+-				if s == nil then
+-					slots[i] = { cx = nx, cy = ny, sx = nx, sy = ny, dx = nx, dy = ny, t0 = now }
+-					continue
+-				end
+-				local f = math.min(1, (now - s.t0) / FrontLayer.ANIM_S)
+-				local cx, cy = s.sx + (s.dx - s.sx) * f, s.sy + (s.dy - s.sy) * f
+-				if math.sqrt((nx - cx) ^ 2 + (ny - cy) ^ 2) > snap then
+-					cx, cy = nx, ny
+-				end
+-				s.sx, s.sy, s.cx, s.cy = cx, cy, cx, cy
+-				s.dx, s.dy, s.t0 = nx, ny, now
+-			end
+-		end
+-	end
+-	for aid, e in self._entries do
+-		if not e.seen then
+-			self._entries[aid] = nil
+-		end
+-	end
+-end
+-
+-local function label(self: any, n: number): Label
+-	local rec = self._labels[n]
+-	if rec ~= nil then
+-		return rec
+-	end
+-	local l = Instance.new("TextLabel")
+-	l.Name = "FrontTroops"
+-	l.BackgroundTransparency = 1
+-	l.AnchorPoint = Vector2.new(0.5, 0.5)
+-	l.AutomaticSize = Enum.AutomaticSize.XY
+-	l.Size = UDim2.fromOffset(0, 0)
+-	l.FontFace = FrontLayer.FONT
+-	l.TextSize = FrontLayer.TEXT_PX
+-	l.ZIndex = FrontLayer.Z
+-	l.Parent = self.root
+-	local s = Instance.new("UIStroke")
+-	s.Color = Color3.new(0, 0, 0)
+-	s.Thickness = 1.5
+-	s.LineJoinMode = Enum.LineJoinMode.Round
+-	s.Parent = l
+-	rec = { label = l, vis = true, text = nil, incoming = nil, x = math.huge, y = math.huge }
+-	self._labels[n] = rec
+-	return rec :: Label
+-end
+-
+-function FrontLayer.tick(self: any, dt: number)
+-	local now = FrameClock.now()
+-	self._poll -= dt
+-	if self._poll <= 0 then
+-		self._poll = FrontLayer.POLL_S
+-		self:_poll_fronts(now)
+-	end
+-	local cam = self.view.rig
+-	local n = 0
+-	for _, e in self._entries do
+-		for _, s in e.slots do
+-			local f = math.min(1, (now - s.t0) / FrontLayer.ANIM_S)
+-			s.cx = s.sx + (s.dx - s.sx) * f
+-			s.cy = s.sy + (s.dy - s.sy) * f
+-			local x, y = cam:map_to_screen(s.cx, s.cy)
+-			if not cam:on_screen(x, y, 40) then
+-				continue
+-			end
+-			n += 1
+-			local rec = label(self, n)
+-			local l = rec.label
+-			-- (each written only when it changed: the text is measured again on every write)
+-			if not rec.vis then
+-				rec.vis = true
+-				l.Visible = true
+-			end
+-			if rec.text ~= e.text then
+-				rec.text = e.text
+-				l.Text = e.text
+-			end
+-			if rec.incoming ~= e.incoming then
+-				rec.incoming = e.incoming
+-				l.TextColor3 = if e.incoming then FrontLayer.INCOMING else FrontLayer.OUTGOING
+-			end
+-			if rec.x ~= x or rec.y ~= y then
+-				rec.x, rec.y = x, y
+-				l.Position = UDim2.fromOffset(x, y)
+-			end
+-		end
+-	end
+-	for j = n + 1, #self._labels do
+-		local rec = self._labels[j]
+-		if rec.vis then
+-			rec.vis = false
+-			rec.label.Visible = false
+-		end
+-	end
+-end
+-
+-return FrontLayer
+diff --git a/src/client/Map/FxLayer.luau b/src/client/Map/FxLayer.luau
+index 6a0b71b..8f8058e 100644
+--- a/src/client/Map/FxLayer.luau
++++ b/src/client/Map/FxLayer.luau
+@@ -27,6 +27,8 @@
+ -- smoke and smoke with fire (DEBRIS_PLAN, looping) scattered within half its radius, 6 s, fading in
+ -- over the first 10 % and out after 80 %; its ring grows to 1.5 x that radius. The radius is the
+ -- look's (NUKE_FX_RADIUS), not the blast's.
++-- RoPlague: a country's first case (infect: a red pop and a wider red wave, INFECT_MIN_PX across at
++-- least) and DNA gained (dna: an orange "+3" rising like an income popup, at any zoom).
+ -- Every pooled object remembers what it was last given and is written only what changed (2026-10-26,
+ -- phones' slow frames: a nuke's 240 debris sprites were written six properties each a frame, with the
+ -- view still and between their frames), and spent effects leave their lists in one pass, in order.
+@@ -40,6 +42,8 @@ local Rules = require(Airfront:WaitForChild("Core"):WaitForChild("Rules")) :: an
+ local MapFx = require(Airfront:WaitForChild("Assets"):WaitForChild("MapFx")) :: any
+ local FrameClock = require(script.Parent:WaitForChild("FrameClock")) :: any
+ 
++local WHITE = Color3.new(1, 1, 1)
++
+ local FxLayer = {}
+ FxLayer.__index = FxLayer
+ 
+@@ -129,7 +133,18 @@ FxLayer.WARHEAD_DEBRIS = 28
+ --- how long a strike's warheads are counted together (s)
+ FxLayer.WARHEAD_WINDOW_S = 10.0
+ 
+-type Fx = { u: number, v: number, r0: number, r1: number, t0: number, dur: number, col: Color3, flash: boolean }
++--- (`px1`: the least radius on screen it grows to, px; 0 for none)
++type Fx = {
++	u: number,
++	v: number,
++	r0: number,
++	r1: number,
++	t0: number,
++	dur: number,
++	col: Color3,
++	flash: boolean,
++	px1: number,
++}
+ type Pop = { u: number, v: number, t0: number, text: string, col: Color3 }
+ --- The pools' GUI objects, each with what it was last given (Roblox's own values, kept here: an object
+ --- shown for another effect still shows them, so nothing needs resetting; `vis` its Visible).
+@@ -186,12 +201,14 @@ type BurstGui = {
+ 	oy: number,
+ 	img_t: number,
+ }
+-type Bonus = { u: number, v: number, t0: number, text: string }
++--- (`col`: the text's colour, white when nil; `always`: shown at any zoom)
++type Bonus = { u: number, v: number, t0: number, text: string, col: Color3?, always: boolean? }
+ type BonusGui = {
+ 	label: TextLabel,
+ 	stroke: UIStroke,
+ 	vis: boolean,
+ 	text: string?,
++	col: Color3?,
+ 	size: number,
+ 	x: number,
+ 	y: number,
+@@ -281,7 +298,16 @@ function FxLayer.destroy(self: any)
+ 	self.root:Destroy()
+ end
+ 
+-local function add(self: any, tile: number, r0: number, r1: number, dur: number, col: Color3, flash: boolean)
++local function add(
++	self: any,
++	tile: number,
++	r0: number,
++	r1: number,
++	dur: number,
++	col: Color3,
++	flash: boolean,
++	px1: number?
++)
+ 	local st = self._state
+ 	if st == nil or tile < 0 then
+ 		return
+@@ -296,6 +322,7 @@ local function add(self: any, tile: number, r0: number, r1: number, dur: number,
+ 		dur = dur,
+ 		col = col,
+ 		flash = flash,
++		px1 = px1 or 0,
+ 	})
+ end
+ 
+@@ -439,6 +466,19 @@ function FxLayer.pop(self: any, tile: number, col: Color3?)
+ 	add(self, tile, 0, FxLayer.POP_RADIUS / k * 0.25, FxLayer.POP_S, col or Color3.new(1, 0.6, 0.25), false)
+ end
+ 
++--- RoPlague: a country's first case at `tile` (GameState.country_infected): a red pop and a wider
++--- red wave behind it, INFECT_MIN_PX across on screen at least so a zoomed-out map shows it.
++FxLayer.INFECT_COLOR = Color3.fromRGB(255, 48, 40)
++FxLayer.INFECT_RADIUS = 34 -- full-size tiles
++FxLayer.INFECT_S = 1.3
++FxLayer.INFECT_MIN_PX = 30
++function FxLayer.infect(self: any, tile: number)
++	local st = self._state
++	local k = tonumber(st and st.map and st.map.k_lin) or Rules.K_LIN
++	self:pop(tile, FxLayer.INFECT_COLOR)
++	add(self, tile, 0, FxLayer.INFECT_RADIUS / k, FxLayer.INFECT_S, FxLayer.INFECT_COLOR, false, FxLayer.INFECT_MIN_PX)
++end
++
+ --- An explosion sprite (BURSTS) at map position (u, v) (tile + 0.5 is the tile's centre).
+ function FxLayer.burst(self: any, kind: string, u: number, v: number)
+ 	local row = FxLayer.BURSTS[kind]
+@@ -519,6 +559,30 @@ function FxLayer.bonus(self: any, tile: number, gold: number)
+ 	})
+ end
+ 
++--- RoPlague: DNA gained at `tile`: an orange "+N" rising from it like an income popup (shown at any
++--- zoom: DNA is rare and it is the player's own).
++FxLayer.DNA_COLOR = Color3.fromRGB(255, 150, 46)
++function FxLayer.dna(self: any, tile: number, amount: number)
++	local st = self._state
++	if st == nil or tile < 0 or tile >= (st.map.N or Defs.TILE_COUNT) or amount <= 0 then
++		return
++	end
++	local W = st.map.W or Defs.W
++	local list = self._bonus
++	if #list >= FxLayer.BONUS_MAX then
++		table.remove(list, 1)
++	end
++	local n = math.floor(amount * 10 + 0.5) / 10
++	table.insert(list, {
++		u = tile % W + 0.5,
++		v = tile // W + 0.5,
++		t0 = FrameClock.now(),
++		text = "+" .. (if n == math.floor(n) then tostring(math.floor(n)) else string.format("%.1f", n)),
++		col = FxLayer.DNA_COLOR,
++		always = true,
++	})
++end
++
+ --- Drop a list's entries from n + 1 on (the spent ones were left behind as the live ones moved up).
+ local function truncate(list: { any }, n: number)
+ 	for i = #list, n + 1, -1 do
+@@ -541,7 +605,7 @@ local function bonus_step(self: any, cam: any, now: number)
+ 		end
+ 		keep += 1
+ 		list[keep] = b
+-		if zoom < FxLayer.BONUS_CULL_ZOOM then
++		if zoom < FxLayer.BONUS_CULL_ZOOM and not b.always then
+ 			continue
+ 		end
+ 		local fs = math.clamp(FxLayer.BONUS_SIZE * zoom, FxLayer.BONUS_MIN_PX, FxLayer.BONUS_MAX_PX)
+@@ -574,6 +638,7 @@ local function bonus_step(self: any, cam: any, now: number)
+ 				stroke = stroke,
+ 				vis = true,
+ 				text = nil,
++				col = nil,
+ 				size = -1,
+ 				x = math.huge,
+ 				y = math.huge,
+@@ -594,6 +659,11 @@ local function bonus_step(self: any, cam: any, now: number)
+ 			g.text = b.text
+ 			label.Text = b.text
+ 		end
++		local col = b.col or WHITE
++		if g.col ~= col then
++			g.col = col
++			label.TextColor3 = col
++		end
+ 		if g.size ~= fs then
+ 			g.size = fs
+ 			label.TextSize = fs
+@@ -926,7 +996,7 @@ function FxLayer.tick(self: any, _dt: number)
+ 		list[keep] = fx
+ 		local x, y = cam:map_to_screen(fx.u, fx.v)
+ 		local e = 1 - (1 - t) ^ 3
+-		local r = (fx.r0 + (fx.r1 - fx.r0) * e) * cam.scale
++		local r = math.max((fx.r0 + (fx.r1 - fx.r0) * e) * cam.scale, fx.px1 * 0.5 * e)
+ 		if not cam:on_screen(x, y, r) then
+ 			continue
+ 		end
+diff --git a/src/client/Map/MapSurface.luau b/src/client/Map/MapSurface.luau
+index 81059fe..14f3692 100644
+--- a/src/client/Map/MapSurface.luau
++++ b/src/client/Map/MapSurface.luau
+@@ -1412,7 +1412,7 @@ end
+ --- upload the dirty bands of ONE image tile (round-robin: Roblox shows one EditableImage update per
+ --- frame).
+ function MapSurface.step(self: MapSurface, budget_tiles: number?, repaint_tiles: number?)
+-	-- (whether this frame wrote an image: Map/FalloutGlow's waits for a frame that did not)
++	-- (whether this frame wrote an image: Map/InfectionLayer waits for a frame that did not)
+ 	self.uploaded = false
+ 	if not self.ready then
+ 		return
+diff --git a/src/client/Map/MapView.luau b/src/client/Map/MapView.luau
+index a6481bf..a767639 100644
+--- a/src/client/Map/MapView.luau
++++ b/src/client/Map/MapView.luau
+@@ -6,15 +6,22 @@
+ --   set_hover_owner, set_selected_owner, set_selected_unit, unit_at_screen, set_aim,
+ --   aim_sams, set_range_*, set_safe_area, set_hud_rects / controls, local_label_rect,
+ --   set_labels_visible, tile_at_screen, screen_pos_of_tile, camera_distance, project, update.
++-- RoPlague adds: signal bubble_clicked(id) (a bubble on the map was pressed: the UI sends the
++--   intent), and dna_float(tile, amount) (an orange "+N" rising from a tile).
+ --
+--- Rendering: three ScreenGuis under the HUD (DisplayOrder MAP_DISPLAY_ORDER and the two above it):
++-- Rendering: four ScreenGuis under the HUD (DisplayOrder MAP_DISPLAY_ORDER and the three above it):
+ --   RofrontMap        Surface (MapSurface: terrain + territory images, pixel-crisp, wrapped
+ --                     east-west) and the Overlay with what seldom changes: spawn / aim markers,
+---                     rails, ranges, structure plates;
+---   RofrontMapUnits   what moves every frame: ships, trains, wakes, munitions, effects, and the
+---                     structures' progress bars;
+---   RofrontMapLabels  names and front numbers (they change with the troop counts).
+--- Why three (2026-10-08; players on Windows had stutter bad enough to quit, ten minutes into a
++--                     the infection, structure plates;
++--   RofrontMapUnits   what moves every frame: ships, trains, wakes, munitions, effects, flights
++--                     and the structures' progress bars;
++--   RofrontMapLabels  names;
++--   RofrontMapBubbles RoPlague's DNA / cure bubbles, over the names (a bubble often sits at a
++--                     country's label point), the only map objects that take presses.
++-- The plague's layers: InfectionLayer (the red, in the Overlay under the plates), FlightLayer (planes,
++-- with the moving layers), BubbleLayer. The war's layers (fronts, SAM ranges, railroads, fallout)
++-- are gone (2026-10-28).
++-- Why several (2026-10-08; players on Windows had stutter bad enough to quit, ten minutes into a
+ -- match): Roblox lays out and draws a ScreenGui again as a whole
+ -- when anything in it changed, and nothing at all when nothing did. As one ScreenGui the map was
+ -- about 13,000 objects twenty minutes into a World match, all of them gone over every frame
+@@ -123,6 +130,8 @@ function MapView.new(): MapView
+ 	self.tile_clicked = Signal.new()
+ 	self.tile_context = Signal.new()
+ 	self.territory_status_changed = Signal.new()
++	--- RoPlague: (id) a bubble was pressed (BubbleLayer)
++	self.bubble_clicked = Signal.new()
+ 	self.input_enabled = true
+ 
+ 	local gui = Instance.new("ScreenGui")
+@@ -204,6 +213,7 @@ function MapView.new(): MapView
+ 	end
+ 	local moving = layer_gui("RofrontMapUnits", MapView.MAP_DISPLAY_ORDER + 1)
+ 	local labels = layer_gui("RofrontMapLabels", MapView.MAP_DISPLAY_ORDER + 2)
++	local bubbles = layer_gui("RofrontMapBubbles", MapView.MAP_DISPLAY_ORDER + 3)
+ 	--- where a layer of the seldom-changing ScreenGui puts what it animates (StructureLayer's bars)
+ 	self.moving_overlay = moving
+ 	self._spawn_ring = ring(overlay, "SpawnPreview", 6)
+@@ -222,14 +232,13 @@ function MapView.new(): MapView
+ 	self.view_rules = optional(script.Parent, "ViewRules")
+ 	for _, spec in
+ 		{
+-			{ "glow", "FalloutGlow", overlay },
+-			{ "roads", "RoadLayer", overlay },
+-			{ "ranges", "RangeLayer", overlay },
++			{ "infection", "InfectionLayer", overlay },
+ 			{ "structures", "StructureLayer", overlay },
+ 			{ "units", "UnitLayer", moving },
++			{ "flights", "FlightLayer", moving },
+ 			{ "fx", "FxLayer", moving },
+ 			{ "labels", "NameLayer", labels },
+-			{ "fronts", "FrontLayer", labels },
++			{ "bubbles", "BubbleLayer", bubbles },
+ 		}
+ 	do
+ 		local mod = optional(script.Parent, spec[2] :: string)
+@@ -344,19 +353,33 @@ function MapView.bind_state(self: any, state: any)
+ 		self.view_rules.use(state.rules)
+ 	end
+ 	local surface = self.surface
++	-- (fallout was on the map before this flags change: see flags_changed)
++	self._fallout_seen = (tonumber(state.fallout_count) or 0) > 0
+ 	self:_connect(state.snapshot_loaded, function()
+ 		surface:bind(state)
+-		call(self.layers.glow, "on_snapshot")
++		self._fallout_seen = (tonumber(state.fallout_count) or 0) > 0
++		for _, name in self._layer_order do
++			call(self.layers[name], "on_snapshot")
++		end
+ 		if self.view_rules then
+ 			self.view_rules.use(state.rules)
+ 		end
+ 	end)
+ 	self:_connect(state.tiles_changed, function(ch, olds)
+ 		surface:on_tiles_changed(ch, olds)
++		call(self.layers.infection, "on_tiles_changed", ch)
+ 	end)
+ 	self:_connect(state.flags_changed, function(ch)
+-		surface:on_flags_changed(ch)
+-		call(self.layers.glow, "on_flags_changed", ch)
++		-- The surface draws only fallout from the flags. The plague's flags (infected / dead) change
++		-- thousands of tiles a second and would repaint and upload the territory images for nothing
++		-- (and keep the infection's own image waiting for a frame without an upload): the surface hears
++		-- of a change only while there is fallout, or there was before it.
++		local fallout = (tonumber(state.fallout_count) or 0) > 0
++		if fallout or self._fallout_seen then
++			surface:on_flags_changed(ch)
++		end
++		self._fallout_seen = fallout
++		call(self.layers.infection, "on_flags_changed", ch)
+ 	end)
+ 	self:_connect(state.owner_added, function(id)
+ 		surface:refresh_palette()
+@@ -389,14 +412,33 @@ function MapView.bind_state(self: any, state: any)
+ 			end
+ 		end)
+ 	end
+-	self:_connect(state.alliance_changed, function()
+-		call(self.layers.ranges, "mark_dirty")
+-	end)
+-	self:_connect(state.road_added, function(rid)
+-		call(self.layers.roads, "mark_road_dirty", rid)
+-	end)
+-	self:_connect(state.road_removed, function(rid)
+-		call(self.layers.roads, "mark_road_dirty", rid)
++	-- RoPlague: flights, bubbles and closures, to every layer with a handler (FlightLayer, BubbleLayer,
++	-- StructureLayer's closed airports / ports)
++	for _, pair in
++		{
++			{ "country_closed", "on_country_closed" },
++			{ "flight_added", "on_flight_added" },
++			{ "flight_ended", "on_flight_ended" },
++			{ "bubble_added", "on_bubble_added" },
++			{ "bubble_removed", "on_bubble_removed" },
++		}
++	do
++		self:_connect(state[pair[1]], function(...)
++			for _, name in self._layer_order do
++				call(self.layers[name], pair[2], ...)
++			end
++		end)
++	end
++	-- a country's first case: a red pop where it entered
++	self:_connect(state.country_infected, function(_c, tile)
++		if type(tile) == "number" and tile >= 0 then
++			local fx = self.layers.fx
++			if fx ~= nil and fx.infect ~= nil then
++				call(fx, "infect", tile)
++			else
++				call(fx, "pop", tile, Color3.fromRGB(255, 48, 40))
++			end
++		end
+ 	end)
+ 	self:_connect(state.nuke_detonated, function(uid, kind, tile, radius, _owner)
+ 		self:_on_nuke_detonated(uid, kind, tile, radius)
+@@ -740,6 +782,28 @@ function MapView._on_nuke_detonated(self: any, uid: number, kind: number, tile:
+ 	call(fx, "nuke", kind, tile, radius)
+ end
+ 
++--- RoPlague: an orange "+N" DNA float rising from `tile` (the UI calls it when DNA is gained:
++--- ctx:world_call("dna_float", {tile, amount})).
++function MapView.dna_float(self: any, tile: number, amount: number)
++	local st = self._state
++	local n = if st ~= nil and st.map ~= nil then st.map.N or N else N
++	if type(tile) ~= "number" or type(amount) ~= "number" or tile < 0 or tile >= n then
++		return
++	end
++	local fx = self.layers.fx
++	if fx ~= nil and fx.dna ~= nil then
++		call(fx, "dna", tile, amount)
++	else
++		call(fx, "bonus", tile, amount)
++	end
++end
++
++--- RoPlague: the bubble drawn nearest `screen_pos` (viewport px) within `radius_px`, or -1.
++function MapView.bubble_at_screen(self: any, screen_pos: Vector2, radius_px: number?): number
++	local v = call(self.layers.bubbles, "bubble_at_screen", screen_pos, radius_px or 28)
++	return if type(v) == "number" then v else -1
++end
++
+ --- Game admins: which "players" are bot players (owner id → true); nil hides the HUMAN badges.
+ function MapView.set_admin_bots(self: any, bots: { [number]: boolean }?)
+ 	local labels = self.layers.labels
+diff --git a/src/client/Map/NameLayer.luau b/src/client/Map/NameLayer.luau
+index f74e057..d40da15 100644
+--- a/src/client/Map/NameLayer.luau
++++ b/src/client/Map/NameLayer.luau
+@@ -5,7 +5,8 @@
+ --     it is the owner's tile, a shoreline tile, ocean with magnitude < 10 or fallout; the largest
+ --     inscribed rectangle of that grid; the name sits at its centre, raised by fontSize / 3, with
+ --     fontSize = min(rect.width / name length * 2, rect.height / 3). Recomputed every 30 ticks
+---     (REPLACE_TICKS) and at once for new owners; spawn-phase names use an 8-tile box on the spawn;
++--     (REPLACE_TICKS) and at once for new owners; spawn-phase names use an 8-tile box on the spawn
++--     (not in a plague match: spawn_placement);
+ --   * sizing: baseSize = max(1, floor(size)), nameSize = max(4, floor(baseSize *
+ --     0.4)), nameScale = min(baseSize * 0.25, 3); the name line is nameSize * nameScale full-size
+ --     tiles tall, the troop line 0.6 of it; names shorter on screen than the cull threshold hide
+@@ -15,6 +16,10 @@
+ -- Sizes are in full-size tiles; our tiles are map.k_lin full-size tiles wide.
+ -- Roblox: one pooled Frame per owner (name + troops TextLabels with UIStroke); TextSize caps at
+ -- 100 px, beyond that a UIScale enlarges the whole plate.
++-- RoPlague: the owners are countries and their `troops` field carries the country's INFECTED count
++-- (the sim's stats rows), so the number line reads as infected people: it is tinted INFECTED_TEXT
++-- and hidden while the count is 0 (an untouched country shows its name alone). The disease
++-- (state.plague.pid) holds no land and never gets a name.
+ local RS = game:GetService("ReplicatedStorage")
+ local Core = RS:WaitForChild("Airfront"):WaitForChild("Core")
+ local Defs = require(Core:WaitForChild("Defs")) :: any
+@@ -62,6 +67,16 @@ NameLayer.LINE_K = 1.0
+ NameLayer.OWN_MAX_VH = 0.04
+ NameLayer.OWN_MAX_MIN_PX = 18.0
+ NameLayer.CROWN_MIN_PX = 16
++--- The crown over the owner with the most land (RoWorld's; set false to drop it).
++NameLayer.SHOW_CROWN = true
++--- RoPlague: the colour of the number line (a country's infected count) in a plague match.
++NameLayer.INFECTED_TEXT = Color3.fromRGB(255, 90, 90)
++
++--- Whether `id` is the disease (RoPlague: an owner with no tiles that is never labelled).
++local function is_disease(st: any, id: number): boolean
++	local p = st.plague
++	return p ~= nil and p.pid == id
++end
+ 
+ type Plate = {
+ 	frame: Frame,
+@@ -345,22 +360,30 @@ end
+ function NameLayer._refresh_queue(self: any, st: any)
+ 	table.clear(self._queue)
+ 	for id, o in st.owners do
+-		if (o.tiles or 0) > 0 then
++		if (o.tiles or 0) > 0 and not is_disease(st, id) then
+ 			table.insert(self._queue, id)
+ 		end
+ 	end
+ end
+ 
++--- Whether names go by the spawn-phase placement (an 8-tile box on the spawn). Not in a plague
++--- match: there the countries hold all their land from the first tick, and the patient-zero screen
++--- (the spawn phase) needs every country's full-size name; the 8-tile box made every name a few px
++--- tall, and the cull hid them all (2026-10-28).
++local function spawn_placement(st: any): boolean
++	return st.phase == Defs.PHASE_SPAWN and st.plague == nil
++end
++
+ function NameLayer._placement_step(self: any, st: any)
+ 	local tick = st.tick or 0
+-	local spawn = st.phase == Defs.PHASE_SPAWN
++	local spawn = spawn_placement(st)
+ 	if tick - self._last_place_tick >= NameLayer.REPLACE_TICKS or tick < self._last_place_tick then
+ 		self._last_place_tick = tick
+ 		self:_refresh_queue(st)
+ 	end
+ 	-- new owners get a target at once
+ 	for id, o in st.owners do
+-		if (o.tiles or 0) > 0 and self._targets[id] == nil then
++		if (o.tiles or 0) > 0 and self._targets[id] == nil and not is_disease(st, id) then
+ 			local t = if spawn then self:_place_spawn(st, id) else self:_place(st, id)
+ 			if t then
+ 				self._targets[id] = t
+@@ -375,7 +398,7 @@ function NameLayer._placement_step(self: any, st: any)
+ 		self._job = Coop.job(function()
+ 			while #q > 0 and self._state == st do
+ 				local id = table.remove(q)
+-				local t = if st.phase == Defs.PHASE_SPAWN then self:_place_spawn(st, id) else self:_place(st, id)
++				local t = if spawn_placement(st) then self:_place_spawn(st, id) else self:_place(st, id)
+ 				if self._state == st then
+ 					self._targets[id] = t
+ 				end
+@@ -486,6 +509,8 @@ function NameLayer._plate(self: any, id: number): Plate
+ 	name.LayoutOrder = 1
+ 	local troops, ts = new_text(f, "Troops", 21)
+ 	troops.LayoutOrder = 2
++	-- (shown once the count is above 0: tick)
++	troops.Visible = false
+ 	f.Parent = self.root
+ 	p = {
+ 		frame = f,
+@@ -548,7 +573,7 @@ function NameLayer.tick(self: any, dt: number)
+ 	self._crown_t -= dt
+ 	if self._crown_t <= 0 then
+ 		self._crown_t = 0.25
+-		self.crown_owner = NameLayer.crown_of(st)
++		self.crown_owner = if NameLayer.SHOW_CROWN then NameLayer.crown_of(st) else 0
+ 	end
+ 	local crown_shown = false
+ 	self:_placement_step(st)
+@@ -566,7 +591,7 @@ function NameLayer.tick(self: any, dt: number)
+ 	end
+ 	for id, t in self._targets do
+ 		local o = st:get_owner(id)
+-		if o == nil or (o.tiles or 0) <= 0 then
++		if o == nil or (o.tiles or 0) <= 0 or is_disease(st, id) then
+ 			continue
+ 		end
+ 		seen[id] = true
+@@ -616,7 +641,8 @@ function NameLayer.tick(self: any, dt: number)
+ 			local shade = shade_of(o.kind)
+ 			local c = Color3.new(shade, shade, shade)
+ 			p.name.TextColor3 = c
+-			p.troops.TextColor3 = c
++			-- (RoPlague: the number is the country's infected people, in red)
++			p.troops.TextColor3 = if st.plague ~= nil then NameLayer.INFECTED_TEXT else c
+ 			local col = st:owner_color(id)
+ 			p.name_stroke.Color = col
+ 			p.troop_stroke.Color = col
+@@ -655,8 +681,17 @@ function NameLayer.tick(self: any, dt: number)
+ 		end
+ 		local troops = o.troops or 0
+ 		if p.troop_n ~= troops then
++			-- (no number while it is 0: an uninfected country shows its name alone)
++			local any = troops > 0
++			if p.troops.Visible ~= any then
++				p.troops.Visible = any
++				p.size_dirty = 3
++			end
+ 			p.troop_n = troops
+-			local tt = NumberFormat.render_troops(troops)
++			-- (render_troops shows a tenth, OpenFront's troop unit; a plague match's number is people)
++			local tt = if st.plague ~= nil
++				then NumberFormat.render_number(troops)
++				else NumberFormat.render_troops(troops)
+ 			if p.troop_text ~= tt then
+ 				p.troop_text = tt
+ 				p.troops.Text = tt
+diff --git a/src/client/Map/RangeLayer.luau b/src/client/Map/RangeLayer.luau
+deleted file mode 100644
+index f188ac2..0000000
+--- a/src/client/Map/RangeLayer.luau
++++ /dev/null
+@@ -1,717 +0,0 @@
+---!native
+--- Range rings on the 2D map: SAM interception coverage and defense-post protection radius, the
+--- prospective ring while placing one, and the selected warship's patrol / targeting rings. The
+--- choice of rings is the globe RangeLayer's (View/RangeLayer.luau _rebuild), drawn as flat GUI
+--- circles (UIStroke keeps widths pixel-constant) with a faint fill:
+---   mode "auto" (default): own SAMs / posts faint, fading out as the view pulls back; while aiming
+---   a nuke the hostile SAMs within NEAR_AIM x their range of the aim tile (red-tinted) and those
+---   covering it (hot: thicker, pulsing; aim_sams() counts them); boat aim / "attack_aim": the
+---   target owner's posts; hovered / focused sites; the build preview ring (+ own rings of that
+---   kind at full strength). "nuke_aim", "all", "none" as in the globe layer.
+--- (2026-10-26, phones' slow frames: a ring remembers what it was last given and is written only what
+--- changed, where every ring on screen was written eight properties a frame; the rings are chosen
+--- again only when what they show changes: not for a missile fired, and while a SAM's range grows
+--- after an upgrade only that ring's radius follows it, a game tick at a time.)
+-local RS = game:GetService("ReplicatedStorage")
+-local Airfront = RS:WaitForChild("Airfront")
+-local Defs = require(Airfront:WaitForChild("Core"):WaitForChild("Defs")) :: any
+-
+-local RangeLayer = {}
+-RangeLayer.__index = RangeLayer
+-
+-RangeLayer.NEAR_AIM = 2.0
+-RangeLayer.MAX_RINGS = 300
+-RangeLayer.Z = 8
+-
+-local C_OWN_SAM, C_OWN_DEF, C_OWN_HI, C_HOSTILE, C_HOT, C_FOCUS, C_BUILD, C_ALL, C_PENDING = 0, 1, 2, 3, 4, 5, 6, 7, 8
+--- per class (index cls + 1): stroke alpha, stroke width (px), fill alpha, pulses
+-local RING_A = { 0.62, 0.55, 0.92, 0.62, 1.0, 0.95, 1.0, 0.6, 0.7 }
+-local WIDTH = { 1.5, 1.5, 2.0, 2.0, 3.0, 2.2, 2.6, 1.5, 1.6 }
+-local FILL_A = { 0.045, 0.04, 0.075, 0.03, 0.055, 0.085, 0.2, 0.03, 0.0 }
+-local PULSE = { false, false, false, false, true, false, true, false, false }
+--- own idle rings fade out between these globe-equivalent camera distances
+-local OWN_SAM_FADE = { 1.9, 2.5 }
+-local OWN_DEF_FADE = { 1.42, 1.72 }
+-
+---- Structure kinds with a ring: SAMs, defense posts, and the Arsenal's Artillery (its range) and
+---- Airfields (their reach, shown while an air strike is aimed or an airfield is placed).
+-local RINGED = {
+-	[Defs.S_SAM] = true,
+-	[Defs.S_DEFENSE] = true,
+-	[Defs.S_ARTILLERY] = true,
+-	[Defs.S_AIRFIELD] = true,
+-}
+-
+-local HOSTILE_TINT = Color3.new(1.0, 0.2, 0.16)
+-local WHITE = Color3.new(1, 1, 1)
+-local HOT_COLOR = HOSTILE_TINT:Lerp(Color3.new(1.0, 0.45, 0.35), 0.25)
+---- a site without levels yet (read only)
+-local NO_LVL = { 1, 0, -100000 }
+-
+---- A ring and what its frame and stroke were last given (Roblox's own values, kept here: a ring
+---- shown for another site still shows them, so nothing needs resetting).
+-type Ring = {
+-	frame: Frame,
+-	stroke: UIStroke,
+-	vis: boolean,
+-	x: number,
+-	y: number,
+-	d: number,
+-	col: Color3?,
+-	fill_t: number,
+-	stroke_col: Color3?,
+-	width: number,
+-	stroke_t: number,
+-}
+---- A ring to draw: map tile, radius (tiles), class, colour; `sid` a SAM's, `grows` while its range
+---- grows after an upgrade (kept from one choice to the next: rewritten, not made again).
+-type Want = { tile: number, r: number, cls: number, col: Color3, sid: number, grows: boolean }
+-
+-function RangeLayer.new(parent: Instance, view: any)
+-	local self = setmetatable({}, RangeLayer) :: any
+-	local root = Instance.new("Frame")
+-	root.Name = "Ranges"
+-	root.BackgroundTransparency = 1
+-	root.Size = UDim2.fromScale(1, 1)
+-	root.ZIndex = RangeLayer.Z
+-	root.Parent = parent
+-	self.root = root
+-	self.view = view
+-	self.VR = view.view_rules
+-	self.mode = "auto"
+-	self._state = nil :: any
+-	self._sites = {} :: { [number]: { number } } -- sid -> { kind, owner, tile }
+-	self._lvl = {} :: { [number]: { number } } -- sid -> { level, active_tick, upgrade_tick }
+-	self._hot = {} :: { [number]: boolean }
+-	self._hot_n = 0
+-	self._aim_kind = ""
+-	self._aim_tile = -1
+-	self._aim_detail = ""
+-	self._aim_level = 1
+-	self._range_owner = 0
+-	self._hover_owner = 0
+-	self._hover_focus = -1
+-	self._ui_focus = -1
+-	--- the rings to draw: the first _want_n of _want
+-	self._want = {} :: { Want }
+-	self._want_n = 0
+-	self._dirty = true
+-	self._next_change = math.huge
+-	--- the game tick the growing SAM rings' radii are for (nil: none grows)
+-	self._grow_tick = nil :: number?
+-	self._last_local = -1
+-	self._rings = {} :: { Ring }
+-	self._unit = nil :: any
+-	--- (the selected warship's rings, rewritten every frame it is selected)
+-	self._unit_rings = {} :: { [string]: any }
+-	self._now = 0.0
+-	return self
+-end
+-
+-function RangeLayer.bind(self: any, state: any)
+-	self._state = state
+-	self:reload()
+-end
+-
+-function RangeLayer.unbind(self: any)
+-	self._state = nil
+-	table.clear(self._sites)
+-	table.clear(self._lvl)
+-	table.clear(self._hot)
+-	self._hot_n = 0
+-	self._hover_focus = -1
+-	self._ui_focus = -1
+-	table.clear(self._want)
+-	self._want_n = 0
+-	self._grow_tick = nil
+-	self._unit = nil
+-	for _, r in self._rings do
+-		if r.vis then
+-			r.vis = false
+-			r.frame.Visible = false
+-		end
+-	end
+-end
+-
+-function RangeLayer.destroy(self: any)
+-	self:unbind()
+-	self.root:Destroy()
+-end
+-
+-function RangeLayer.reload(self: any)
+-	table.clear(self._sites)
+-	table.clear(self._lvl)
+-	if self._state ~= nil then
+-		for _, s in self._state.structures do
+-			if RINGED[s.kind] then
+-				self._sites[s.sid] = { s.kind, s.owner, s.tile }
+-				self._lvl[s.sid] = { s.level, s.active_tick, -100000 }
+-			end
+-		end
+-	end
+-	self._dirty = true
+-end
+-
+-function RangeLayer.on_structure_added(self: any, sid: number)
+-	local s = if self._state ~= nil then self._state.structures[sid] else nil
+-	if s ~= nil and RINGED[s.kind] then
+-		self._sites[sid] = { s.kind, s.owner, s.tile }
+-		if self._lvl[sid] == nil then
+-			self._lvl[sid] = { s.level, s.active_tick, -100000 }
+-		end
+-		self._dirty = true
+-	end
+-end
+-
+-function RangeLayer.on_structure_leveled(self: any, sid: number)
+-	local s = if self._state ~= nil then self._state.structures[sid] else nil
+-	if s == nil or self._sites[sid] == nil then
+-		return
+-	end
+-	local was = self._lvl[sid]
+-	if was ~= nil and was[1] == s.level and was[2] == s.active_tick then
+-		-- a missile fired or reloaded (Ev.STRUCT_SHOTS comes as structure_leveled too): the range is
+-		-- as it was, and choosing every ring again for each shot of a late game's SAM wall cost the most
+-		return
+-	end
+-	local old = was or { s.level, s.active_tick, -100000 }
+-	local up = old[3]
+-	if s.level > old[1] then
+-		up = self._state.tick
+-	end
+-	self._lvl[sid] = { s.level, s.active_tick, up }
+-	self._dirty = true
+-end
+-
+-function RangeLayer.on_structure_changed(self: any, sid: number)
+-	self:on_structure_added(sid)
+-end
+-
+-function RangeLayer.on_structure_removed(self: any, sid: number)
+-	self._lvl[sid] = nil
+-	if self._sites[sid] ~= nil then
+-		self._sites[sid] = nil
+-		self._dirty = true
+-	end
+-end
+-
+-function RangeLayer.mark_dirty(self: any)
+-	self._dirty = true
+-end
+-
+-function RangeLayer.set_mode(self: any, m: string)
+-	if m ~= self.mode then
+-		self.mode = m
+-		self._dirty = true
+-	end
+-end
+-
+-function RangeLayer.set_aim(self: any, kind: string, tile: number, detail: string, level: number?): number
+-	local lv = math.max(level or 1, 1)
+-	if kind ~= self._aim_kind or tile ~= self._aim_tile or detail ~= self._aim_detail or lv ~= self._aim_level then
+-		self._aim_kind, self._aim_tile, self._aim_detail, self._aim_level = kind, tile, detail or "", lv
+-		self._dirty = true
+-		self:_update_hot()
+-	end
+-	return self._hot_n
+-end
+-
+-function RangeLayer.aim_sams(self: any): number
+-	return self._hot_n
+-end
+-
+-function RangeLayer.set_range_owner(self: any, id: number)
+-	if id ~= self._range_owner then
+-		self._range_owner = id
+-		self._dirty = true
+-	end
+-end
+-
+-function RangeLayer.set_hover_owner(self: any, id: number)
+-	if id ~= self._hover_owner then
+-		self._hover_owner = id
+-		if self.mode == "attack_aim" and self._range_owner == 0 then
+-			self._dirty = true
+-		end
+-	end
+-end
+-
+-function RangeLayer.set_hover_tile(self: any, tile: number, px_tiles: number)
+-	local f = self:_sites_near(tile, px_tiles)
+-	if f ~= self._hover_focus then
+-		self._hover_focus = f
+-		self._dirty = true
+-	end
+-end
+-
+-function RangeLayer.set_focus_tile(self: any, tile: number, px_tiles: number)
+-	local f = self:_sites_near(tile, px_tiles)
+-	if f ~= self._ui_focus then
+-		self._ui_focus = f
+-		self._dirty = true
+-	end
+-end
+-
+---- Selected warship: patrol ring around map point (pu, pv) and targeting ring around (au, av), radii
+---- in tiles, `col` its owner's colour. (Called every frame a warship is selected: plain numbers and
+---- one table kept, the tints worked out when the colour changes.)
+-function RangeLayer.set_unit_rings(
+-	self: any,
+-	pu: number,
+-	pv: number,
+-	patrol_r: number,
+-	au: number,
+-	av: number,
+-	target_r: number,
+-	col: Color3
+-)
+-	local ur = self._unit_rings
+-	ur.pu, ur.pv, ur.patrol_r = pu, pv, patrol_r
+-	ur.au, ur.av, ur.target_r = au, av, target_r
+-	if ur.col ~= col then
+-		ur.col = col
+-		ur.patrol_col = col:Lerp(WHITE, 0.4)
+-		ur.target_col = col:Lerp(WHITE, 0.3)
+-	end
+-	self._unit = ur
+-end
+-
+-function RangeLayer.clear_unit_rings(self: any)
+-	self._unit = nil
+-end
+-
+--- ---------------------------------------------------------------------------------------------
+--- Rules
+--- ---------------------------------------------------------------------------------------------
+-
+-function RangeLayer._build_kind(self: any): number
+-	local ak, det = self._aim_kind, self._aim_detail
+-	if ak == "build" or string.sub(ak, 1, 6) == "build:" then
+-		local k = if det ~= "" then det else string.sub(ak, 7)
+-		if k == "sam" then
+-			return Defs.S_SAM
+-		elseif k == "defense" then
+-			return Defs.S_DEFENSE
+-		elseif k == "factory" then
+-			return Defs.S_FACTORY
+-		elseif k == "artillery" then
+-			return Defs.S_ARTILLERY
+-		elseif k == "airfield" then
+-			return Defs.S_AIRFIELD
+-		end
+-	elseif ak == "sam" then
+-		return Defs.S_SAM
+-	elseif ak == "defense" then
+-		return Defs.S_DEFENSE
+-	end
+-	return -1
+-end
+-
+-function RangeLayer._nuke_kind(self: any): number
+-	for k = 0, Defs.NUKE_KIND_COUNT - 1 do
+-		if Defs.NUKE_NAMES[k] == self._aim_detail then
+-			return k
+-		end
+-	end
+-	return -1
+-end
+-
+-function RangeLayer._hostile(self: any, owner_id: number, local_id: number): boolean
+-	return owner_id ~= local_id and not self._state:are_allies(owner_id, local_id)
+-end
+-
+-function RangeLayer._range_of(self: any, sid: number, kind: number, cur: number): number
+-	local VR = self.VR
+-	if kind == Defs.S_ARTILLERY then
+-		return VR.artillery_range()
+-	elseif kind == Defs.S_AIRFIELD then
+-		return VR.airfield_range()
+-	elseif kind ~= Defs.S_SAM then
+-		return VR.defense_range()
+-	end
+-	local l = self._lvl[sid] or NO_LVL
+-	return VR.sam_range_at(l[1], cur - l[3])
+-end
+-
+-function RangeLayer._update_hot(self: any)
+-	table.clear(self._hot)
+-	self._hot_n = 0
+-	local state = self._state
+-	local VR = self.VR
+-	if state == nil or VR == nil or self._aim_kind ~= "nuke" or self._aim_tile < 0 then
+-		return
+-	end
+-	local nk = self:_nuke_kind()
+-	local mirv = nk == Defs.N_MIRV
+-	if nk >= 0 and VR.intercept_p(if mirv then Defs.N_WARHEAD else nk) <= 0.0 then
+-		return
+-	end
+-	local local_id = state.local_owner
+-	local cur = math.floor(state.render_tick)
+-	local tg = if mirv then state:tile_owner(self._aim_tile) else 0
+-	local _, spread = VR.nuke_radii(Defs.N_MIRV)
+-	for sid, s in self._sites do
+-		local l = self._lvl[sid]
+-		if s[1] ~= Defs.S_SAM or not self:_hostile(s[2], local_id) or (l ~= nil and l[2] > cur) then
+-			continue
+-		end
+-		local r = self:_range_of(sid, s[1], cur)
+-		local d2 = VR.range_d2(s[3], self._aim_tile)
+-		if d2 <= r * r or (mirv and tg ~= 0 and s[2] == tg and d2 <= (spread + r) * (spread + r)) then
+-			self._hot[sid] = true
+-			self._hot_n += 1
+-		end
+-	end
+-end
+-
+-function RangeLayer._sites_near(self: any, tile: number, px_tiles: number): number
+-	local st = self._state
+-	if tile < 0 or st == nil then
+-		return -1
+-	end
+-	local W = st.map.W or Defs.W
+-	local rr = math.max(px_tiles, 1.5)
+-	local best = rr * rr
+-	local best_sid = -1
+-	local tx, ty = tile % W, tile // W
+-	for sid, s in self._sites do
+-		local dx = s[3] % W - tx
+-		local dy = s[3] // W - ty
+-		local d = dx * dx + dy * dy
+-		if d <= best then
+-			best = d
+-			best_sid = sid
+-		end
+-	end
+-	return best_sid
+-end
+-
+---- The next ring to draw (the list's records are kept from one choice to the next).
+-local function push(self: any, tile: number, r: number, cls: number, col: Color3, sid: number, grows: boolean)
+-	local n = self._want_n + 1
+-	self._want_n = n
+-	local w = self._want[n]
+-	if w == nil then
+-		w = {} :: any
+-		self._want[n] = w
+-	end
+-	w.tile, w.r, w.cls, w.col, w.sid, w.grows = tile, r, cls, col, sid, grows
+-end
+-
+-function RangeLayer._rebuild(self: any)
+-	local state = self._state
+-	local VR = self.VR
+-	self._want_n = 0
+-	self._grow_tick = nil
+-	if state == nil or VR == nil then
+-		return
+-	end
+-	local local_id = state.local_owner
+-	local cur = math.floor(state.render_tick)
+-	self._next_change = math.huge
+-	local grow_ticks = VR.sam_upgrade_ticks()
+-	local mode = self.mode
+-	local auto = mode ~= "none"
+-	local aiming_nuke = self._aim_kind == "nuke" and self._aim_tile >= 0
+-	local nuke_aim = (aiming_nuke and mode ~= "none") or mode == "nuke_aim"
+-	local atk = 0
+-	if self._aim_kind == "boat" and self._aim_tile >= 0 then
+-		atk = state:tile_owner(self._aim_tile)
+-	elseif mode == "attack_aim" then
+-		atk = if self._range_owner ~= 0 then self._range_owner else self._hover_owner
+-	end
+-	if atk == local_id then
+-		atk = 0
+-	end
+-	local bk = self:_build_kind()
+-	local upgrading = bk >= 0 and self._aim_tile >= 0 and self._aim_level > 1
+-	local NEAR2 = RangeLayer.NEAR_AIM * RangeLayer.NEAR_AIM
+-	for sid, s in self._sites do
+-		if self._want_n >= RangeLayer.MAX_RINGS - 1 then
+-			break
+-		end
+-		if upgrading and s[3] == self._aim_tile and s[1] == bk then
+-			continue
+-		end
+-		local l = self._lvl[sid] or NO_LVL
+-		local pending = l[2] > cur
+-		local grows = false
+-		if pending then
+-			self._next_change = math.min(self._next_change, l[2])
+-		elseif s[1] == Defs.S_SAM and cur - l[3] < grow_ticks then
+-			if aiming_nuke then
+-				-- (the hot SAMs and those near the aim follow the radius: all chosen again each tick)
+-				self._next_change = cur + 1
+-			else
+-				-- (only its radius changes: tick() follows it, _regrow)
+-				grows = true
+-			end
+-		end
+-		local r = self:_range_of(sid, s[1], cur)
+-		local own = local_id ~= 0 and s[2] == local_id
+-		local hostile = not own and self:_hostile(s[2], local_id)
+-		local cls = -1
+-		if s[1] == Defs.S_SAM then
+-			if nuke_aim and hostile then
+-				if self._hot[sid] then
+-					cls = C_HOT
+-				elseif not aiming_nuke or VR.range_d2(s[3], self._aim_tile) <= NEAR2 * r * r then
+-					cls = C_HOSTILE
+-				end
+-			elseif own and bk == Defs.S_SAM then
+-				cls = C_OWN_HI
+-			elseif own and auto then
+-				cls = C_OWN_SAM
+-			end
+-		elseif s[1] == Defs.S_ARTILLERY then
+-			-- a battery's range: yours faint (like a post's), bright while you place another
+-			if own and bk == Defs.S_ARTILLERY then
+-				cls = C_OWN_HI
+-			elseif own and auto then
+-				cls = C_OWN_DEF
+-			end
+-		elseif s[1] == Defs.S_AIRFIELD then
+-			-- an airfield's reach: only while you aim an air strike or place another airfield
+-			if own and (bk == Defs.S_AIRFIELD or (aiming_nuke and self._aim_detail == "airstrike")) then
+-				cls = C_OWN_HI
+-			end
+-		else
+-			if atk ~= 0 and s[2] == atk then
+-				cls = C_HOSTILE
+-			elseif own and bk == Defs.S_DEFENSE then
+-				cls = C_OWN_HI
+-			elseif own and auto then
+-				cls = C_OWN_DEF
+-			end
+-		end
+-		if (cls < C_HOSTILE or cls == C_ALL) and ((auto and self._hover_focus == sid) or self._ui_focus == sid) then
+-			cls = C_FOCUS
+-		end
+-		if cls < 0 and mode == "all" then
+-			cls = C_ALL
+-		end
+-		if cls < 0 then
+-			continue
+-		end
+-		if pending then
+-			cls = C_PENDING
+-		end
+-		local col = state:owner_color(s[2])
+-		if cls == C_OWN_SAM or cls == C_OWN_DEF or cls == C_OWN_HI then
+-			col = col:Lerp(WHITE, 0.4)
+-		elseif cls == C_HOSTILE then
+-			col = col:Lerp(HOSTILE_TINT, 0.62)
+-		elseif cls == C_HOT then
+-			col = HOT_COLOR
+-		elseif cls == C_FOCUS then
+-			col = if hostile then col:Lerp(HOSTILE_TINT, 0.55) else col:Lerp(WHITE, 0.3)
+-		else
+-			col = if hostile then col:Lerp(HOSTILE_TINT, 0.35) else col:Lerp(WHITE, 0.3)
+-		end
+-		push(self, s[3], r, cls, col, sid, grows)
+-		if grows then
+-			self._grow_tick = cur
+-		end
+-	end
+-	if bk >= 0 and self._aim_tile >= 0 then
+-		-- the ghost's range is a white disc (20 % fill) with a bright edge
+-		local bc = WHITE
+-		push(
+-			self,
+-			self._aim_tile,
+-			if bk == Defs.S_SAM
+-				then VR.sam_range(self._aim_level)
+-				elseif bk == Defs.S_FACTORY then VR.factory_range()
+-				elseif bk == Defs.S_ARTILLERY then VR.artillery_range()
+-				elseif bk == Defs.S_AIRFIELD then VR.airfield_range()
+-				else VR.defense_range(),
+-			C_BUILD,
+-			bc,
+-			-1,
+-			false
+-		)
+-	end
+-end
+-
+---- A game tick on while SAM rings grow after an upgrade (nothing else changed): their radii follow
+---- it, as a full _rebuild would have made them.
+-function RangeLayer._regrow(self: any, cur: number)
+-	local grow_ticks = self.VR.sam_upgrade_ticks()
+-	local any = false
+-	local want = self._want
+-	for i = 1, self._want_n do
+-		local w = want[i]
+-		if not w.grows then
+-			continue
+-		end
+-		w.r = self:_range_of(w.sid, Defs.S_SAM, cur)
+-		local l = self._lvl[w.sid] or NO_LVL
+-		if cur - l[3] < grow_ticks then
+-			any = true
+-		else
+-			w.grows = false
+-		end
+-	end
+-	self._grow_tick = if any then cur else nil
+-end
+-
+--- ---------------------------------------------------------------------------------------------
+--- Drawing
+--- ---------------------------------------------------------------------------------------------
+-
+-function RangeLayer._ring(self: any, i: number): Ring
+-	local r = self._rings[i]
+-	if r then
+-		return r
+-	end
+-	local f = Instance.new("Frame")
+-	f.Name = "Ring"
+-	f.AnchorPoint = Vector2.new(0.5, 0.5)
+-	f.BorderSizePixel = 0
+-	f.ZIndex = RangeLayer.Z
+-	local c = Instance.new("UICorner")
+-	c.CornerRadius = UDim.new(0.5, 0)
+-	c.Parent = f
+-	local s = Instance.new("UIStroke")
+-	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+-	s.Parent = f
+-	f.Parent = self.root
+-	-- (what a new Frame and UIStroke show: every value is written on the first draw)
+-	r = {
+-		frame = f,
+-		stroke = s,
+-		vis = true,
+-		x = math.huge,
+-		y = math.huge,
+-		d = -1,
+-		col = nil,
+-		fill_t = -1,
+-		stroke_col = nil,
+-		width = -1,
+-		stroke_t = -1,
+-	}
+-	self._rings[i] = r
+-	return r
+-end
+-
+-local function smoothstep(a: number, b: number, x: number): number
+-	local t = math.clamp((x - a) / (b - a), 0, 1)
+-	return t * t * (3 - 2 * t)
+-end
+-
+-function RangeLayer._draw(
+-	self: any,
+-	i: number,
+-	u: number,
+-	v: number,
+-	radius: number,
+-	cls: number,
+-	col: Color3,
+-	k: number
+-)
+-	local cam = self.view.rig
+-	local x, y = cam:map_to_screen(u, v)
+-	local d = radius * 2 * cam.scale
+-	if d < 4 or k <= 0.01 or not cam:on_screen(x, y, d * 0.5) then
+-		return i
+-	end
+-	i += 1
+-	local r = self:_ring(i)
+-	local pulse = if PULSE[cls + 1] then 0.5 + 0.5 * math.sin(self._now * 5.0) else 0.0
+-	-- (each written only when it changed: a still view of idle rings writes nothing, a pan only the
+-	-- positions, the pulsing ones their fill and stroke)
+-	local f, s = r.frame, r.stroke
+-	if not r.vis then
+-		r.vis = true
+-		f.Visible = true
+-	end
+-	if r.x ~= x or r.y ~= y then
+-		r.x, r.y = x, y
+-		f.Position = UDim2.fromOffset(x, y)
+-	end
+-	if r.d ~= d then
+-		r.d = d
+-		f.Size = UDim2.fromOffset(d, d)
+-	end
+-	if r.col ~= col then
+-		r.col = col
+-		f.BackgroundColor3 = col
+-	end
+-	local fill_t = 1 - FILL_A[cls + 1] * k * (1 + 0.3 * pulse)
+-	if r.fill_t ~= fill_t then
+-		r.fill_t = fill_t
+-		f.BackgroundTransparency = fill_t
+-	end
+-	if r.stroke_col ~= col then
+-		r.stroke_col = col
+-		s.Color = col
+-	end
+-	local width = WIDTH[cls + 1] * (1 + 0.25 * pulse)
+-	if r.width ~= width then
+-		r.width = width
+-		s.Thickness = width
+-	end
+-	local stroke_t = 1 - RING_A[cls + 1] * k
+-	if r.stroke_t ~= stroke_t then
+-		r.stroke_t = stroke_t
+-		s.Transparency = stroke_t
+-	end
+-	return i
+-end
+-
+-function RangeLayer.tick(self: any, dt: number?)
+-	local state = self._state
+-	if state == nil or self.VR == nil then
+-		return
+-	end
+-	self._now += dt or (1 / 60)
+-	local cur = math.floor(state.render_tick)
+-	if cur >= self._next_change then
+-		self._dirty = true
+-	end
+-	if state.local_owner ~= self._last_local then
+-		self._last_local = state.local_owner
+-		self._dirty = true
+-	end
+-	if self._dirty then
+-		self._dirty = false
+-		self:_update_hot()
+-		self:_rebuild()
+-	elseif self._grow_tick ~= nil and cur > self._grow_tick then
+-		self:_regrow(cur)
+-	end
+-	local cam = self.view.rig
+-	local W = state.map.W or Defs.W
+-	local cam_d = cam:scale_to_distance(cam.scale)
+-	-- own idle rings fade with the zoom (the same for all of a class)
+-	local k_sam = 1 - smoothstep(OWN_SAM_FADE[1], OWN_SAM_FADE[2], cam_d)
+-	local k_def = 1 - smoothstep(OWN_DEF_FADE[1], OWN_DEF_FADE[2], cam_d)
+-	local i = 0
+-	local want = self._want
+-	for n = 1, self._want_n do
+-		local w = want[n]
+-		local k = 1.0
+-		if w.cls == C_OWN_SAM then
+-			k = k_sam
+-		elseif w.cls == C_OWN_DEF then
+-			k = k_def
+-		end
+-		i = self:_draw(i, w.tile % W + 0.5, w.tile // W + 0.5, w.r, w.cls, w.col, k)
+-	end
+-	local ur = self._unit
+-	if ur ~= nil then
+-		if ur.patrol_r > 0 then
+-			i = self:_draw(i, ur.pu, ur.pv, ur.patrol_r, C_OWN_HI, ur.patrol_col, 1)
+-		end
+-		i = self:_draw(i, ur.au, ur.av, ur.target_r, C_FOCUS, ur.target_col, 1)
+-	end
+-	for j = i + 1, #self._rings do
+-		local r = self._rings[j]
+-		if r.vis then
+-			r.vis = false
+-			r.frame.Visible = false
+-		end
+-	end
+-end
+-
+-return RangeLayer
+diff --git a/src/client/Map/RoadLayer.luau b/src/client/Map/RoadLayer.luau
+deleted file mode 100644
+index 9654cef..0000000
+--- a/src/client/Map/RoadLayer.luau
++++ /dev/null
+@@ -1,672 +0,0 @@
+---!native
+--- Railroads on the 2D map: every railroad follows its tile path
+--- (GameState.roads: rid -> {a, b, tiles}) and fades in over FADE_RANGE up to zoom MIN_ZOOM.
+--- Zoomed out it is a line a full-size tile wide along the path's centre (THICKNESS 1: the path's straight
+--- runs, pooled GUI bars); zoomed in, a detailed track (from DETAIL_ZOOM): each tile a
+--- 3 x 3 grid, two rails along its sides and a tie between them, a turn's tile its own piece (the two
+--- sides it joins, rail_kinds). The track is a tiled image (assets/rails, RailArt)
+--- along each straight stretch and one per turn.
+--- Coloured by the land under them: grey on unclaimed land, a light rail on the
+--- local player's land (dark over light territory) and the owner's border colour elsewhere; runs are
+--- cut every RUN_MAX tiles so the colour follows the borders they cross. Redrawn when the camera or
+--- the network changes, and now and then for the colours.
+---
+--- (2026-10-12: in the trailer's rail shot the train tracks looked poor; they
+--- were bars 0.4 of a tile wide, 2 px at a continent's zoom, and never the track.)
+--- (2026-10-27, "Script - Roads" was phones' second slow-frame cause: a pan moved every rail on the
+--- screen, one Position each, and a rail coming on or going off the screen handed every rail after it
+--- in the pool another run: six writes each. Now the rails sit in a frame placed at the map's origin
+--- (`_pan`), each where it is at this zoom, so a pan writes the frame alone; until the view has moved
+--- PAN_SLACK px no rail is even looked at (the rails that far off the screen are kept). A run or piece
+--- keeps its GUI object while it is drawn.)
+-local RS = game:GetService("ReplicatedStorage")
+-local UserInputService = game:GetService("UserInputService")
+-local Airfront = RS:WaitForChild("Airfront")
+-local Rules = require(Airfront:WaitForChild("Core"):WaitForChild("Rules")) :: any
+-local RailArt = require(Airfront:WaitForChild("Assets"):WaitForChild("RailArt")) :: any
+-local MapSurface = require(script.Parent:WaitForChild("MapSurface")) :: any
+-
+-local RoadLayer = {}
+-RoadLayer.__index = RoadLayer
+-
+---- Rail zoom levels: device px per full-size tile (the GUI scale x
+---- the device ratio, capped at 2). Rails are drawn from MIN_ZOOM - FADE_RANGE (invisible)
+---- to MIN_ZOOM (opaque), a line THICKNESS full-size tiles wide, and the detailed track from
+---- DETAIL_ZOOM on.
+-RoadLayer.MIN_ZOOM = 3.0
+-RoadLayer.FADE_RANGE = 2.0
+-RoadLayer.DETAIL_ZOOM = 6.0
+-RoadLayer.THICKNESS = 1.0
+---- Device px per GUI px: Roblox's GUI px are points on a
+---- phone or tablet, pixels on a desktop at 100%, and nothing tells the real ratio, so 2 on a touch
+---- screen (every phone's is 2 or more, capped at 2) and 1 on a desktop. (It used to be 2
+---- everywhere, and faded the rails in from MIN_ZOOM to MIN_ZOOM + FADE_RANGE, not up to MIN_ZOOM;
+---- 2026-10-13: always seeing these railroads when zoomed out may have made the game worse, so
+---- zoomed out they now fade away.)
+---- (read when drawn: at the client's start the keyboard may not be known yet; nil = by the device)
+-RoadLayer.DEVICE_RATIO = nil :: number?
+-function RoadLayer.device_ratio(): number
+-	return RoadLayer.DEVICE_RATIO
+-		or if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then 2.0 else 1.0
+-end
+-RoadLayer.RUN_MAX = 12 -- tiles per bar at most
+---- A line thinner than a device pixel is drawn one device pixel wide and as transparent as it is
+---- thinner (the coverage of an anti-aliased line).
+-RoadLayer.RECOLOR_S = 0.5
+-RoadLayer.UNOWNED = Color3.new(0.75, 0.75, 0.75)
+---- The local player's rails: LIGHT, or DARK when the
+---- player's territory colour is brighter than LIGHT_ABOVE (perceived brightness). Others' are their
+---- border colour (the palette's border row: HSL lightness - BORDER_DARKEN, as MapSurface's borders).
+-RoadLayer.LIGHT = Color3.fromRGB(0xE6, 0xE6, 0xE6)
+-RoadLayer.DARK = Color3.new(0, 0, 0)
+-RoadLayer.LIGHT_ABOVE = 0.8
+-RoadLayer.BORDER_DARKEN = 0.125
+-RoadLayer.Z = 6
+---- Hidden bars kept for reuse.
+-RoadLayer.POOL_SPARE = 64
+---- A pan this far (px) from where the rails were last laid out moves their frame and nothing else:
+---- the rails within PAN_SLACK of the screen's edges are drawn (not while zooming).
+-RoadLayer.PAN_SLACK = 64
+-
+---- A tile's rail kind, an index into KIND_ART
+-local H, V, TL, TR, BL, BR = 1, 2, 3, 4, 5, 6
+-local KIND_ART = { "h", "v", "tl", "tr", "bl", "br" }
+-
+-type Run = {
+-	x0: number,
+-	y0: number,
+-	x1: number,
+-	y1: number,
+-	mid: number,
+-	mu: number?,
+-	mv: number?,
+-	lm: number?,
+-	rot: number?,
+-	col: Color3?,
+-	slot: number?,
+-}
+-
+---- A piece of the detailed track: the tiles x0..x1 x y0..y1 (one tile, or a straight stretch of one
+---- kind), their kind (H .. BR), a tile for the colour (mid) and the centre in map units (mu, mv).
+-type Piece = {
+-	x0: number,
+-	y0: number,
+-	x1: number,
+-	y1: number,
+-	kind: number,
+-	mid: number,
+-	mu: number,
+-	mv: number,
+-	col: Color3?,
+-	slot: number?,
+-}
+-
+---- A pool of GUI objects: what each was last given (written again only when it changes: a pan moves
+---- them and nothing else, a zoom sizes them; on a phone a late game's camera move rewrote six
+---- properties of every rail on screen each frame, 2026-10-12): its run or piece (and so its rotation
+---- or image), colour, transparency, size, and position (2026-10-26: the recolouring every RECOLOR_S
+---- moved every rail on screen to where it already was). A slot keeps its run or piece while that is
+---- drawn (item.slot; 2026-10-27): `seen` the pass that last drew it, `free` the hidden slots, `holes`
+---- the slots whose object went, `top` the highest slot.
+-local function new_pool()
+-	return {
+-		items = {},
+-		run = {},
+-		col = {},
+-		a = {},
+-		w = {},
+-		h = {},
+-		x = {},
+-		y = {},
+-		seen = {},
+-		free = {},
+-		holes = {},
+-		top = 0,
+-	}
+-end
+-
+-function RoadLayer.new(parent: Instance, view: any)
+-	local self = setmetatable({}, RoadLayer) :: any
+-	local root = Instance.new("Frame")
+-	root.Name = "Roads"
+-	root.BackgroundTransparency = 1
+-	root.Size = UDim2.fromScale(1, 1)
+-	root.ZIndex = RoadLayer.Z
+-	root.Parent = parent
+-	self.root = root
+-	--- the rails' frame: at the map's origin on the screen (whole px), the rails in it where they are
+-	--- at this zoom
+-	local pan = Instance.new("Frame")
+-	pan.Name = "Pan"
+-	pan.BackgroundTransparency = 1
+-	pan.BorderSizePixel = 0
+-	pan.Size = UDim2.fromOffset(0, 0)
+-	pan.ZIndex = RoadLayer.Z
+-	pan.Parent = root
+-	self._pan = pan
+-	self._px, self._py = 0, 0
+-	self.view = view
+-	self._state = nil :: any
+-	--- the lines (Frames) and the detailed track (ImageLabels)
+-	self._bars = new_pool()
+-	self._track = new_pool()
+-	--- rid -> the railroad's runs / track pieces (built once per railroad, when first drawn)
+-	self._runs = {} :: { [number]: { Run } }
+-	self._pieces = {} :: { [number]: { Piece } }
+-	self._dirty = true
+-	self._cam_version = -1
+-	self._recolor = 0.0
+-	--- the rails' last layout: its pass, zoom, viewport, the map's origin on the screen and how far
+-	--- past the screen's edges it drew (PAN_SLACK, or 0 while zooming)
+-	self._pass = 0
+-	self._lay_s, self._lay_vp = -1.0, nil :: Vector2?
+-	self._lay_x, self._lay_y, self._lay_slack = 0.0, 0.0, 0.0
+-	--- runs and pieces the last layout drew
+-	self._drawn = 0
+-	--- owner -> rail colour, for one pass (see colour())
+-	self._border = {} :: { [number]: Color3 }
+-	return self
+-end
+-
+-function RoadLayer.bind(self: any, state: any)
+-	self._state = state
+-	table.clear(self._runs)
+-	table.clear(self._pieces)
+-	self._dirty = true
+-end
+-
+---- After a pass: the slots it did not draw (seen ~= pass) are hidden and free; the spares past
+---- POOL_SPARE go (a map zoomed out shows no rails, yet a late game's 1,300 bars were laid out again
+---- with the plates on every camera move).
+-local function sweep(pool: any, pass: number)
+-	local run, seen, free = pool.run, pool.seen, pool.free
+-	for j = 1, pool.top do
+-		-- (an object is shown exactly while it has a run: no need to ask Roblox)
+-		if run[j] ~= nil and seen[j] ~= pass then
+-			run[j] = nil
+-			pool.items[j].Visible = false
+-			table.insert(free, j)
+-		end
+-	end
+-	while #free > RoadLayer.POOL_SPARE do
+-		local j = table.remove(free) :: number
+-		pool.items[j]:Destroy()
+-		pool.items[j] = nil
+-		pool.col[j], pool.a[j], pool.w[j], pool.h[j] = nil, nil, nil, nil
+-		pool.x[j], pool.y[j], pool.seen[j] = nil, nil, nil
+-		table.insert(pool.holes, j)
+-	end
+-end
+-
+---- The slot of `pool` drawing `item` (a run or piece) this pass: its own while it stays drawn, else
+---- a free one, else a new slot (`items[j]` nil: the caller makes its object). `fresh`: the slot's
+---- object shows something else (or nothing) until this item is written into it.
+-local function acquire(pool: any, item: any, pass: number): (number, boolean)
+-	local j = item.slot
+-	local fresh = j == nil or pool.run[j] ~= item
+-	if fresh then
+-		j = table.remove(pool.free)
+-		if j == nil then
+-			j = table.remove(pool.holes)
+-			if j == nil then
+-				pool.top += 1
+-				j = pool.top
+-			end
+-		end
+-		item.slot = j
+-		pool.run[j] = item
+-		pool.col[j] = nil
+-		pool.a[j] = -1
+-		pool.w[j] = -1
+-		pool.x[j] = nil
+-	end
+-	pool.seen[j] = pass
+-	return j :: number, fresh
+-end
+-
+-function RoadLayer.unbind(self: any)
+-	self._state = nil
+-	table.clear(self._runs)
+-	table.clear(self._pieces)
+-	for _, pool in { self._bars, self._track } do
+-		sweep(pool, -1)
+-	end
+-end
+-
+---- The rails' frame at the map's origin on the screen, in whole px (written when that moved).
+-function RoadLayer._place(self: any, ox: number, oy: number)
+-	local x, y = math.round(ox), math.round(oy)
+-	if x ~= self._px or y ~= self._py then
+-		self._px, self._py = x, y
+-		self._pan.Position = UDim2.fromOffset(x, y)
+-	end
+-end
+-
+-function RoadLayer.destroy(self: any)
+-	self:unbind()
+-	self.root:Destroy()
+-end
+-
+-function RoadLayer.mark_road_dirty(self: any, rid: number?)
+-	if rid ~= nil then
+-		self._runs[rid] = nil
+-		self._pieces[rid] = nil
+-	end
+-	self._dirty = true
+-end
+-
+---- A run's drawing in map space, from its end tiles: its midpoint (mu, mv: tile centres), its length
+---- (lm) and its rotation (degrees: the camera scales both axes alike, so it is the screen's too).
+-local function with_geometry(run: any): any
+-	local u0, v0, u1, v1 = run.x0 + 0.5, run.y0 + 0.5, run.x1 + 0.5, run.y1 + 0.5
+-	local du, dv = u1 - u0, v1 - v0
+-	run.mu, run.mv = (u0 + u1) * 0.5, (v0 + v1) * 0.5
+-	run.lm = math.sqrt(du * du + dv * dv)
+-	run.rot = if run.lm > 0 then math.deg(math.atan2(dv, du)) else 0
+-	return run
+-end
+-
+---- The straight runs of a tile path (at most RUN_MAX tiles each), in tile coordinates, with their
+---- geometry; `.bbox` = { u0, v0, u1, v1 } of the whole railroad (map units).
+-function RoadLayer.build_runs(tiles: { number }, W: number, run_max: number): { Run }
+-	local runs = RoadLayer._build_runs(tiles, W, run_max)
+-	local u0, v0, u1, v1 = math.huge, math.huge, -math.huge, -math.huge
+-	for _, run in runs do
+-		with_geometry(run)
+-		u0 = math.min(u0, run.x0, run.x1)
+-		v0 = math.min(v0, run.y0, run.y1)
+-		u1 = math.max(u1, run.x0 + 1, run.x1 + 1)
+-		v1 = math.max(v1, run.y0 + 1, run.y1 + 1)
+-	end
+-	if #runs > 0 then
+-		(runs :: any).bbox = { u0, v0, u1, v1 }
+-	end
+-	return runs
+-end
+-
+-function RoadLayer._build_runs(tiles: { number }, W: number, run_max: number): { Run }
+-	local runs = {}
+-	local n = #tiles
+-	if n == 0 then
+-		return runs
+-	end
+-	if n == 1 then
+-		local t = tiles[1]
+-		table.insert(runs, { x0 = t % W, y0 = t // W, x1 = t % W, y1 = t // W, mid = t })
+-		return runs
+-	end
+-	local i0 = 1
+-	while i0 < n do
+-		local a, b = tiles[i0], tiles[i0 + 1]
+-		local dx, dy = b % W - a % W, b // W - a // W
+-		local j = i0 + 1
+-		while j < n and j - i0 < run_max do
+-			local c, d = tiles[j], tiles[j + 1]
+-			if d % W - c % W ~= dx or d // W - c // W ~= dy then
+-				break
+-			end
+-			j += 1
+-		end
+-		local s, e = tiles[i0], tiles[j]
+-		table.insert(runs, { x0 = s % W, y0 = s // W, x1 = e % W, y1 = e // W, mid = tiles[(i0 + j) // 2] })
+-		i0 = j
+-	end
+-	return runs
+-end
+-
+---- An end tile's kind, from the tile next to it.
+-local function extremity(t: number, n: number, W: number): number
+-	local dx, dy = n % W - t % W, n // W - t // W
+-	if dx == 0 then
+-		return V
+-	elseif dy == 0 then
+-		return H
+-	end
+-	return V
+-end
+-
+---- A tile's kind, from the tiles before and after it.
+-local function direction(p: number, c: number, n: number, W: number): number
+-	local dx1, dy1 = c % W - p % W, c // W - p // W
+-	local dx2, dy2 = n % W - c % W, n // W - c // W
+-	if dx1 == dx2 and dy1 == dy2 then
+-		return if dx1 ~= 0 then H else V
+-	end
+-	if (dx1 == 0 and dx2 ~= 0) or (dx1 ~= 0 and dx2 == 0) then
+-		if dx1 == 0 and dx2 == 1 and dy1 == -1 then
+-			return BR
+-		elseif dx1 == 0 and dx2 == -1 and dy1 == -1 then
+-			return BL
+-		elseif dx1 == 0 and dx2 == 1 and dy1 == 1 then
+-			return TR
+-		elseif dx1 == 0 and dx2 == -1 and dy1 == 1 then
+-			return TL
+-		elseif dx1 == 1 and dx2 == 0 and dy2 == -1 then
+-			return TL
+-		elseif dx1 == -1 and dx2 == 0 and dy2 == -1 then
+-			return TR
+-		elseif dx1 == 1 and dx2 == 0 and dy2 == 1 then
+-			return BL
+-		elseif dx1 == -1 and dx2 == 0 and dy2 == 1 then
+-			return BR
+-		end
+-	end
+-	return V
+-end
+-
+---- The kind of every tile of a path.
+-function RoadLayer.rail_kinds(tiles: { number }, W: number): { number }
+-	local n = #tiles
+-	local kinds = table.create(n, V)
+-	if n >= 2 then
+-		kinds[1] = extremity(tiles[1], tiles[2], W)
+-		for i = 2, n - 1 do
+-			kinds[i] = direction(tiles[i - 1], tiles[i], tiles[i + 1], W)
+-		end
+-		kinds[n] = extremity(tiles[n], tiles[n - 1], W)
+-	end
+-	return kinds
+-end
+-
+---- The detailed track of a path: its tiles' kinds (rail_kinds), a straight stretch of tiles of one
+---- kind side by side one piece (at most run_max tiles), each turn a piece of its own; `.bbox` as
+---- build_runs'.
+-function RoadLayer.build_pieces(tiles: { number }, W: number, run_max: number): { Piece }
+-	local kinds = RoadLayer.rail_kinds(tiles, W)
+-	local pieces = {}
+-	local cur: any = nil
+-	local lx, ly = 0, 0
+-	for i, t in tiles do
+-		local x, y, k = t % W, t // W, kinds[i]
+-		if
+-			cur ~= nil
+-			and cur.kind == k
+-			and cur.n < run_max
+-			and ((k == H and y == ly and math.abs(x - lx) == 1) or (k == V and x == lx and math.abs(y - ly) == 1))
+-		then
+-			cur.x0, cur.x1 = math.min(cur.x0, x), math.max(cur.x1, x)
+-			cur.y0, cur.y1 = math.min(cur.y0, y), math.max(cur.y1, y)
+-			cur.n += 1
+-		else
+-			cur = { x0 = x, y0 = y, x1 = x, y1 = y, kind = k, n = 1 }
+-			table.insert(pieces, cur)
+-		end
+-		lx, ly = x, y
+-	end
+-	local u0, v0, u1, v1 = math.huge, math.huge, -math.huge, -math.huge
+-	for _, pc in pieces do
+-		-- the colour's tile: the middle one (a stretch is a row or a column)
+-		pc.mid = ((pc.y0 + pc.y1) // 2) * W + (pc.x0 + pc.x1) // 2
+-		pc.n = nil
+-		pc.mu, pc.mv = (pc.x0 + pc.x1 + 1) * 0.5, (pc.y0 + pc.y1 + 1) * 0.5
+-		u0, v0 = math.min(u0, pc.x0), math.min(v0, pc.y0)
+-		u1, v1 = math.max(u1, pc.x1 + 1), math.max(v1, pc.y1 + 1)
+-	end
+-	if #pieces > 0 then
+-		(pieces :: any).bbox = { u0, v0, u1, v1 }
+-	end
+-	return pieces
+-end
+-
+-local function luminance(c: Color3): number
+-	return 0.299 * c.R + 0.587 * c.G + 0.114 * c.B
+-end
+-
+---- A railroad's bbox off the screen (with margin m)?
+-local function off_screen(
+-	bb: any,
+-	ax: number,
+-	ay: number,
+-	s: number,
+-	cu: number,
+-	cv: number,
+-	vw: number,
+-	vh: number,
+-	m: number
+-): boolean
+-	return bb ~= nil
+-		and (
+-			ax + (bb[3] - cu) * s < -m
+-			or ay + (bb[4] - cv) * s < -m
+-			or ax + (bb[1] - cu) * s > vw + m
+-			or ay + (bb[2] - cv) * s > vh + m
+-		)
+-end
+-
+---- A run's or piece's colour: the land under its middle tile, looked up again when `recolor` (else
+---- kept), the border colours of the pass in `border` (owner -> colour).
+-local function colour(
+-	st: any,
+-	item: any,
+-	recolor: boolean,
+-	me: number,
+-	mine: Color3,
+-	border: { [number]: Color3 }
+-): Color3
+-	local col = item.col
+-	if col == nil or recolor then
+-		local own = st:tile_owner(item.mid)
+-		if own == 0 then
+-			col = RoadLayer.UNOWNED
+-		elseif own == me then
+-			col = mine
+-		else
+-			col = border[own]
+-			if col == nil then
+-				local c = st:owner_color(own)
+-				col = Color3.new(MapSurface.darken(c.R, c.G, c.B, RoadLayer.BORDER_DARKEN))
+-				border[own] = col
+-			end
+-		end
+-		item.col = col
+-	end
+-	return col
+-end
+-
+-function RoadLayer.tick(self: any, dt: number)
+-	local st = self._state
+-	if st == nil then
+-		return
+-	end
+-	local cam = self.view.rig
+-	self._recolor -= dt
+-	if not self._dirty and cam.version == self._cam_version and self._recolor > 0 then
+-		return
+-	end
+-	self._cam_version = cam.version
+-	local ax, ay = cam:anchor()
+-	local s, cu, cv = cam.scale, cam.cu, cam.cv
+-	local vp = cam._vp
+-	-- the map's origin on the screen: the rails' frame goes there; a pan that keeps within the last
+-	-- layout's slack (same zoom, same viewport) moves it and nothing else
+-	local ox, oy = ax - cu * s, ay - cv * s
+-	local lay_slack = self._lay_slack
+-	if
+-		not self._dirty
+-		and self._recolor > 0
+-		and s == self._lay_s
+-		and vp == self._lay_vp
+-		and math.abs(ox - self._lay_x) <= lay_slack
+-		and math.abs(oy - self._lay_y) <= lay_slack
+-	then
+-		-- (no rail shown, zoomed out: not even the frame)
+-		if self._drawn > 0 then
+-			self:_place(ox, oy)
+-		end
+-		return
+-	end
+-	self:_place(ox, oy)
+-	-- (while the zoom changes every rail is written again each frame: none past the screen then)
+-	local slack = if s == self._lay_s then RoadLayer.PAN_SLACK else 0
+-	local recolor_due = self._recolor <= 0 or self._dirty
+-	if recolor_due then
+-		self._recolor = RoadLayer.RECOLOR_S
+-	end
+-	self._dirty = false
+-	self._lay_s, self._lay_vp, self._lay_x, self._lay_y, self._lay_slack = s, vp, ox, oy, slack
+-	self._pass += 1
+-	local pass = self._pass
+-	local drawn = 0
+-	local k = tonumber(st.map and st.map.k_lin) or Rules.K_LIN
+-	local dpr = RoadLayer.device_ratio()
+-	local zoom = cam.scale / k * dpr
+-	local a = math.clamp((zoom - (RoadLayer.MIN_ZOOM - RoadLayer.FADE_RANGE)) / RoadLayer.FADE_RANGE, 0, 1)
+-	local bars, track = self._bars, self._track
+-	if a > 0.01 then
+-		local W = st.map.W
+-		local detail = zoom >= RoadLayer.DETAIL_ZOOM
+-		-- the line: THICKNESS full-size tiles, at least a device pixel (thinner: fainter instead)
+-		local thick = RoadLayer.THICKNESS * cam.scale / k
+-		local line_a = a
+-		if thick < 1 / dpr then
+-			line_a = a * thick * dpr
+-			thick = 1 / dpr
+-		end
+-		local me = st.local_owner or 0
+-		local mine = RoadLayer.LIGHT
+-		if me ~= 0 then
+-			mine = if luminance(st:owner_color(me)) > RoadLayer.LIGHT_ABOVE then RoadLayer.DARK else RoadLayer.LIGHT
+-		end
+-		-- (colours follow the land under the rails: looked up again every RECOLOR_S, not on every
+-		-- camera move; the projection is done here, once per run, from the camera's anchor; the
+-		-- border colours are worked out again each pass, in a table kept for it)
+-		local recolor = recolor_due
+-		local border = self._border
+-		table.clear(border)
+-		local vw, vh = vp.X, vp.Y
+-		local pan = self._pan
+-		for rid, r in st.roads do
+-			if detail then
+-				local pieces = self._pieces[rid]
+-				if pieces == nil then
+-					pieces = RoadLayer.build_pieces(r.tiles or {}, W, RoadLayer.RUN_MAX)
+-					self._pieces[rid] = pieces
+-				end
+-				-- a railroad off the screen as a whole: none of its pieces is looked at
+-				if off_screen((pieces :: any).bbox, ax, ay, s, cu, cv, vw, vh, slack) then
+-					continue
+-				end
+-				-- (by index: `pieces.bbox` is a field of the same table)
+-				for i = 1, #pieces do
+-					local pc = pieces[i]
+-					local tw, th = pc.x1 - pc.x0 + 1, pc.y1 - pc.y0 + 1
+-					local w, h = tw * s, th * s
+-					local mx, my = ax + (pc.mu - cu) * s, ay + (pc.mv - cv) * s
+-					local mw, mh = w * 0.5 + slack, h * 0.5 + slack
+-					if mx < -mw or my < -mh or mx > vw + mw or my > vh + mh then
+-						continue
+-					end
+-					local col = colour(st, pc, recolor, me, mine, border)
+-					drawn += 1
+-					local j, fresh = acquire(track, pc, pass)
+-					local b = track.items[j]
+-					if b == nil then
+-						b = Instance.new("ImageLabel")
+-						b.Name = "Track"
+-						b.AnchorPoint = Vector2.new(0.5, 0.5)
+-						b.BackgroundTransparency = 1
+-						b.BorderSizePixel = 0
+-						b.ResampleMode = Enum.ResamplerMode.Pixelated
+-						b.ZIndex = RoadLayer.Z
+-						b.Parent = pan
+-						track.items[j] = b
+-					end
+-					if fresh then
+-						b.Visible = true
+-						b.Image = RailArt[KIND_ART[pc.kind]]
+-						-- a stretch repeats the tile once per tile (TileSize in scale: exact whatever the
+-						-- px), a turn is one tile
+-						if tw > 1 or th > 1 then
+-							b.ScaleType = Enum.ScaleType.Tile
+-							b.TileSize = UDim2.fromScale(1 / tw, 1 / th)
+-						else
+-							b.ScaleType = Enum.ScaleType.Stretch
+-						end
+-					end
+-					if track.col[j] ~= col then
+-						track.col[j] = col
+-						b.ImageColor3 = col
+-					end
+-					if track.a[j] ~= a then
+-						track.a[j] = a
+-						b.ImageTransparency = 1 - a
+-					end
+-					-- (in the rails' frame: where it is at this zoom)
+-					local x, y = pc.mu * s, pc.mv * s
+-					if track.x[j] ~= x or track.y[j] ~= y then
+-						track.x[j], track.y[j] = x, y
+-						b.Position = UDim2.fromOffset(x, y)
+-					end
+-					if track.w[j] ~= w or track.h[j] ~= h then
+-						track.w[j], track.h[j] = w, h
+-						b.Size = UDim2.fromOffset(w, h)
+-					end
+-				end
+-				continue
+-			end
+-			local runs = self._runs[rid]
+-			if runs == nil then
+-				runs = RoadLayer.build_runs(r.tiles or {}, W, RoadLayer.RUN_MAX)
+-				self._runs[rid] = runs
+-			end
+-			-- a railroad off the screen as a whole: none of its runs is looked at
+-			if off_screen((runs :: any).bbox, ax, ay, s, cu, cv, vw, vh, thick + slack) then
+-				continue
+-			end
+-			-- (by index: `runs.bbox` is a field of the same table, and `for _, run in runs` met it
+-			-- after the runs, failed, and left every later railroad undrawn and stale bars on the
+-			-- screen: 238K sessions' warnings a day on v79-v81, 2026-10-12)
+-			for i = 1, #runs do
+-				local run = runs[i]
+-				local len = run.lm * s
+-				local mx, my = ax + (run.mu - cu) * s, ay + (run.mv - cv) * s
+-				local m = len * 0.5 + thick + slack
+-				if mx < -m or my < -m or mx > vw + m or my > vh + m then
+-					continue
+-				end
+-				local col = colour(st, run, recolor, me, mine, border)
+-				drawn += 1
+-				local j, fresh = acquire(bars, run, pass)
+-				local b = bars.items[j]
+-				if b == nil then
+-					b = Instance.new("Frame")
+-					b.Name = "Rail"
+-					b.AnchorPoint = Vector2.new(0.5, 0.5)
+-					b.BorderSizePixel = 0
+-					b.ZIndex = RoadLayer.Z
+-					b.Parent = pan
+-					bars.items[j] = b
+-				end
+-				if fresh then
+-					b.Visible = true
+-					b.Rotation = run.rot
+-				end
+-				if bars.col[j] ~= col then
+-					bars.col[j] = col
+-					b.BackgroundColor3 = col
+-				end
+-				if bars.a[j] ~= line_a then
+-					bars.a[j] = line_a
+-					b.BackgroundTransparency = 1 - line_a
+-				end
+-				local x, y = run.mu * s, run.mv * s
+-				if bars.x[j] ~= x or bars.y[j] ~= y then
+-					bars.x[j], bars.y[j] = x, y
+-					b.Position = UDim2.fromOffset(x, y)
+-				end
+-				-- a run spans its end tiles' centres; half a thickness more each way closes the corners
+-				-- (corner tiles: two half-segments meeting at the centre)
+-				local w = len + thick
+-				if bars.w[j] ~= w or bars.h[j] ~= thick then
+-					bars.w[j], bars.h[j] = w, thick
+-					b.Size = UDim2.fromOffset(w, thick)
+-				end
+-			end
+-		end
+-	end
+-	sweep(bars, pass)
+-	sweep(track, pass)
+-	self._drawn = drawn
+-end
+-
+-return RoadLayer
+diff --git a/src/client/Map/StructureLayer.luau b/src/client/Map/StructureLayer.luau
+index c4c66c8..69493c0 100644
+--- a/src/client/Map/StructureLayer.luau
++++ b/src/client/Map/StructureLayer.luau
+@@ -24,8 +24,15 @@
+ -- (2026-10-26, phones' slow frames: a plate and its bar remember what they were last given and are
+ -- written only what changed, read nothing back from Roblox; a structure's own event redraws that
+ -- structure alone, where every SAM shot on the map used to redraw every plate.)
++-- RoPlague: only ports and airfields (a country's ports and airports) are drawn (SHOWN); the other
++-- kinds belong to the war game. Some 440 of them cover the World map, so in a plague match they keep
++-- out of the way: nothing at all from the overview until PLAGUE_DOT_PPT (px per full-size tile, at a
++-- 900 px tall view: scaled with the view's height), a small dot of the plate up to PLAGUE_PLATE_PPT
++-- (France is then some 300 px across), RoWorld's plates from there, growing gently. A closed airport
++-- / port (its country's state.plague closed bits: 1 airports, 2 ports) is greyed and faded.
+ local RS = game:GetService("ReplicatedStorage")
+ local Airfront = RS:WaitForChild("Airfront")
++local Defs = require(Airfront:WaitForChild("Core"):WaitForChild("Defs")) :: any
+ local Rules = require(Airfront:WaitForChild("Core"):WaitForChild("Rules")) :: any
+ local Sprites = require(Airfront:WaitForChild("Assets"):WaitForChild("MapSprites")) :: any
+ --- Sprites.shapes_one is used once it is known to have loaded (an image still in moderation would leave
+@@ -74,6 +81,34 @@ StructureLayer.BAR_COLORS = {
+ StructureLayer.BAR_MIN_PX = 10
+ local SHAPE_SCALE = StructureLayer.SHAPE_SCALE
+ local ICON_FILL = StructureLayer.ICON_FILL
++--- The structure kinds drawn (Defs.S_* -> true).
++StructureLayer.SHOWN = { [Defs.S_PORT] = true, [Defs.S_AIRFIELD] = true }
++local SHOWN = StructureLayer.SHOWN
++--- RoPlague zooms (px per full-size tile at a 900 px tall view): nothing below DOT, a dot of DOT_PX
++--- (x the kind's shape scale) up to PLATE, then plates of ICON_SIZE x PLATE_SCALE0 growing as the
++--- square root of the zoom, at most PLATE_SCALE_MAX.
++StructureLayer.PLAGUE_DOT_PPT = 3.0
++StructureLayer.PLAGUE_PLATE_PPT = 6.0
++StructureLayer.PLAGUE_DOT_PX = 5
++StructureLayer.PLAGUE_PLATE_SCALE0 = 0.72
++StructureLayer.PLAGUE_PLATE_SCALE_MAX = 1.3
++--- A closed one: its colours mixed this far to CLOSED_GREY, the plate and its glyph this transparent.
++StructureLayer.CLOSED_GREY = Color3.fromRGB(120, 120, 124)
++StructureLayer.CLOSED_MIX = 0.7
++StructureLayer.CLOSED_T = 0.35
++StructureLayer.CLOSED_GLYPH_T = 0.55
++--- The closed bits (state.plague.countries[c].closed) that close each kind.
++local CLOSE_BITS = { [Defs.S_AIRFIELD] = 1, [Defs.S_PORT] = 2 }
++
++--- Whether structure `s` is a closed airport / port (RoPlague).
++function StructureLayer.is_closed(st: any, s: any): boolean
++	local bits = CLOSE_BITS[s.kind]
++	if bits == nil or st == nil or st.plague == nil then
++		return false
++	end
++	local row = if st.country_row ~= nil then st:country_row(s.owner) else nil
++	return row ~= nil and bit32.band(tonumber(row.closed) or 0, bits) ~= 0
++end
+ 
+ type Plate = {
+ 	--- the plate: the whole shape (rim and fill in one image, or the rim alone under `fill`)
+@@ -196,6 +231,7 @@ end
+ 
+ function StructureLayer.unbind(self: any)
+ 	self._state = nil
++	self._hidden = false
+ 	for sid, p in self._plates do
+ 		self:_release(p)
+ 		self._plates[sid] = nil
+@@ -227,6 +263,12 @@ StructureLayer.on_structure_leveled = StructureLayer.on_structure_added
+ function StructureLayer.mark_structures_dirty(self: any)
+ 	self._dirty = true
+ end
++--- GameState.country_closed (RoPlague): its airports / ports may have closed or opened.
++function StructureLayer.on_country_closed(self: any, _c: number?, _bits: number?, _old: number?)
++	self._dirty = true
++end
++--- A state (re)loaded (MapView): its structures came without structure_added.
++StructureLayer.on_snapshot = StructureLayer.mark_structures_dirty
+ 
+ local function image(parent: Instance, name: string, id: string, z: number): ImageLabel
+ 	local l = Instance.new("ImageLabel")
+@@ -323,8 +365,11 @@ function StructureLayer._style(self: any, p: Plate, s: any, building: boolean)
+ 	local one = one_ready
+ 	-- (a number, not a string: built for every plate on screen at every camera move, and a phone pays
+ 	-- for the strings it made; 2026-10-12)
+-	local key = (((k * 1024 + s.owner) * 2 + (if building then 1 else 0)) * 4096 + math.min(s.level or 1, 4095)) * 2
++	local closed = StructureLayer.is_closed(st, s)
++	local key = (
++		(((k * 1024 + s.owner) * 2 + (if building then 1 else 0)) * 4096 + math.min(s.level or 1, 4095)) * 2
+ 		+ (if one then 1 else 0)
++	) * 2 + (if closed then 1 else 0)
+ 	if key == p.state_key then
+ 		return
+ 	end
+@@ -339,7 +384,14 @@ function StructureLayer._style(self: any, p: Plate, s: any, building: boolean)
+ 		local b = if s.owner == st.local_owner then c else border_color(c)
+ 		rim_col = value_scale(b, StructureLayer.BORDER_V)
+ 	end
++	if closed then
++		fill_col = fill_col:Lerp(StructureLayer.CLOSED_GREY, StructureLayer.CLOSED_MIX)
++		rim_col = rim_col:Lerp(StructureLayer.CLOSED_GREY, StructureLayer.CLOSED_MIX * 0.5)
++	end
++	local plate_t = if closed then StructureLayer.CLOSED_T else 0
+ 	local plate = p.frame
++	plate.ImageTransparency = plate_t
++	p.glyph.ImageTransparency = if closed then StructureLayer.CLOSED_GLYPH_T else 0
+ 	local cell = shapes.cell
+ 	plate.ImageRectSize = Vector2.new(cell, cell)
+ 	plate.ImageRectOffset = Vector2.new(col * cell, 0)
+@@ -365,6 +417,7 @@ function StructureLayer._style(self: any, p: Plate, s: any, building: boolean)
+ 		f.ImageRectOffset = Vector2.new(col * cell, cell)
+ 		f.ImageRectSize = Vector2.new(cell, cell)
+ 		f.ImageColor3 = fill_col
++		f.ImageTransparency = plate_t
+ 	end
+ 	p.glyph.Image = icons.id
+ 	local ic = icons.cell
+@@ -388,12 +441,12 @@ end
+ function StructureLayer.progress(s: any, rt: number): number?
+ 	local at = s.active_tick or 0
+ 	if at > rt then
+-		local dur = Rules.BUILD_TICKS[s.kind] or 50
++		local dur = if Rules.BUILD_TICKS ~= nil then Rules.BUILD_TICKS[s.kind] or 50 else 50
+ 		return math.clamp(1 - (at - rt) / math.max(1, dur), 0, 1)
+ 	end
+ 	local shots = s.shots
+ 	-- (a SAM's and a silo's missiles; an airfield rearming, a railgun reloading: Rules.RELOAD_TICKS)
+-	local reload = Rules.RELOAD_TICKS[s.kind] or 0
++	local reload = if Rules.RELOAD_TICKS ~= nil then Rules.RELOAD_TICKS[s.kind] or 0 else 0
+ 	if reload > 0 and shots ~= nil and #shots > 0 then
+ 		local cd = reload
+ 		local slots = math.max(1, s.level or 1)
+@@ -524,7 +577,7 @@ function StructureLayer._visit(
+ 	local cam = self.view.rig
+ 	local s = st.structures[sid]
+ 	local p = self._plates[sid]
+-	if s ~= nil then
++	if s ~= nil and SHOWN[s.kind] then
+ 		local x, y = cam:tile_to_screen(s.tile)
+ 		local size = base * (SHAPE_SCALE[s.kind + 1] or 1.0)
+ 		if cam:on_screen(x, y, size) then
+@@ -566,6 +619,39 @@ function StructureLayer.tick(self: any, _dt: number)
+ 	local dots = zoom <= StructureLayer.DOTS_ZOOM
+ 	local base = StructureLayer.ICON_SIZE * icon_scale
+ 	local ppt = cam.scale / k
++	if st.plague ~= nil then
++		-- (RoPlague: see the header; the zooms are for a 900 px tall view)
++		local vh = math.max(cam:viewport_height(), 300) / 900
++		local dot_ppt, plate_ppt = StructureLayer.PLAGUE_DOT_PPT * vh, StructureLayer.PLAGUE_PLATE_PPT * vh
++		if ppt < dot_ppt then
++			-- nothing drawn: the plates go once, and nothing is looked at until the zoom comes back
++			if not self._hidden then
++				self._hidden = true
++				for sid, p in self._plates do
++					self:_release(p)
++					self._plates[sid] = nil
++				end
++				table.clear(self._anim)
++			end
++			table.clear(self._touched)
++			return
++		end
++		if self._hidden then
++			self._hidden = false
++			self._dirty = true
++		end
++		if ppt < plate_ppt then
++			dots = true
++			base = StructureLayer.PLAGUE_DOT_PX
++		else
++			dots = false
++			base = StructureLayer.ICON_SIZE
++				* math.min(
++					StructureLayer.PLAGUE_PLATE_SCALE0 * math.sqrt(ppt / plate_ppt),
++					StructureLayer.PLAGUE_PLATE_SCALE_MAX
++				)
++		end
++	end
+ 	-- (the one-image atlas arrived: every plate is styled again)
+ 	if one_ready ~= self._one_seen then
+ 		self._one_seen = one_ready
+@@ -604,6 +690,9 @@ function StructureLayer.tick(self: any, _dt: number)
+ 	local vw, vh = vp.X, vp.Y
+ 	local plates = self._plates
+ 	for sid, s in st.structures do
++		if not SHOWN[s.kind] then
++			continue
++		end
+ 		local tile = s.tile
+ 		local x = ax + (tile % W + 0.5 - cu) * sc
+ 		local y = ay + (tile // W + 0.5 - cv) * sc
+diff --git a/src/client/Map/UnitLayer.luau b/src/client/Map/UnitLayer.luau
+index 23a277d..786b8ef 100644
+--- a/src/client/Map/UnitLayer.luau
++++ b/src/client/Map/UnitLayer.luau
+@@ -18,6 +18,8 @@
+ --     The ship and its wake follow the route with its corners rounded (Map/WakeRoute: the Sim's
+ --     paths are straight legs meeting at sharp corners, and the wake was a few straight bars until
+ --     2026-10-07, when it was made to curve smoothly), drawn as short straight bars.
++--   * RoPlague (state.plague set): a transport is a ship carrying the disease, so it and its wake are
++--     the infection's red (INFECTED_RGB) rather than its country's colour; cargo ships keep theirs.
+ --
+ -- What it costs (2026-10-08; players on Windows had stutter bad enough to quit, ten minutes into a
+ -- match). Twenty minutes into a World match there are 700 units, and with the
+@@ -127,6 +129,26 @@ type Sprite = {
+ -- the kind of sprite (a unit 0, its train cars 1..6, a nuke 8, a shell 9, a SAM missile 10).
+ local KEY_NUKE, KEY_SHELL, KEY_SAM = 8, 9, 10
+ 
++--- RoPlague: an infected ship's colour, and the sprite owner key that stands for it.
++UnitLayer.INFECTED_RGB = Color3.fromRGB(255, 52, 44)
++local INFECTED_KEY = -7
++
++--- The colour of the sprites of `owner` (INFECTED_KEY: an infected ship).
++local function sprite_color(st: any, owner: number): Color3
++	if owner == INFECTED_KEY then
++		return UnitLayer.INFECTED_RGB
++	end
++	return st:owner_color(owner)
++end
++
++--- The owner key a unit's sprite and wake are drawn in.
++local function unit_key(st: any, u: any): number
++	if u.kind == Defs.U_TRANSPORT and st.plague ~= nil then
++		return INFECTED_KEY
++	end
++	return u.owner
++end
++
+ local function border_of(c: Color3): Color3
+ 	local h, s, v = c:ToHSV()
+ 	-- HSL lightness - 0.125 approximated in HSV (value drop keeps hue / saturation)
+@@ -298,7 +320,7 @@ function UnitLayer._sprite(
+ 	end
+ 	if s.owner ~= owner then
+ 		s.owner = owner
+-		local c = self._state:owner_color(owner)
++		local c = sprite_color(self._state, owner)
+ 		s.fill.ImageColor3 = c
+ 		if s.rim ~= nil then
+ 			s.rim.ImageColor3 = border_of(c)
+@@ -506,7 +528,7 @@ function UnitLayer.tick(self: any, _dt: number)
+ 		local route = w.route
+ 		local ux, uy, seg = WakeRoute.at(route, UnitLayer.path_done(u, rt))
+ 		w.x, w.y = ux, uy
+-		local c = st:owner_color(u.owner)
++		local c = sprite_color(st, unit_key(st, u))
+ 		local xs, ys = route.xs, route.ys
+ 		local sx0, sy0 = cam:map_to_screen(xs[1], ys[1])
+ 		for j = 1, seg do
+@@ -559,7 +581,7 @@ function UnitLayer.tick(self: any, _dt: number)
+ 		if pick then
+ 			self._screen[uid] = Vector2.new(x, y)
+ 		end
+-		self:_sprite(uid * 16, col, u.owner, x, y, px, seen)
++		self:_sprite(uid * 16, col, unit_key(st, u), x, y, px, seen)
+ 		drawn += 1
+ 	end
+ 	self._drawn = drawn
